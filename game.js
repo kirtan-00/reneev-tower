@@ -107,6 +107,7 @@ const Assets = {
   crown: null,
   base: null,
   skyline: null,
+  skyHero: null,
   wordmark: null,
   confetti: null,
   ready: false,
@@ -144,6 +145,8 @@ async function loadAssets() {
 
   // Branding agent assets — may not exist yet. Load with graceful fallback.
   Assets.skyline = loadImage('assets/bg/skyline.png');
+  // Hero sky is produced concurrently and MAY be absent — code-gradient covers it.
+  Assets.skyHero = loadImage('assets/bg/sky_hero.png');
   Assets.wordmark = loadImage('assets/logo/page22_wordmark.png');
   Assets.confetti = loadImage('assets/fx/confetti.png');
 
@@ -651,34 +654,402 @@ function updateFx(dt) {
    9. RENDERING
    ========================================================================== */
 
+/* ----------------------------------------------------------------------------
+   8a. ANIMATED, ALTITUDE-DRIVEN PARALLAX BACKGROUND
+   Layer order (all behind the world scene, drawn inside clearAndSky):
+     1. Hero sky image (panned with altitude) OR code dusk->high-sky gradient.
+     2. Far skyline silhouette band (optional, low on the horizon).
+     3. Ground scene: footpath + greenery + road + moving cars, anchored at
+        GROUND_Y so it scrolls DOWN out of view as the tower rises.
+     4. Drifting parallax clouds (3 layers), gated/strengthened by altitude.
+     5. Bird flocks crossing the upper sky, gated to high altitude.
+   Positions derive from Game.fxTime + pre-allocated property arrays => no
+   per-frame allocation, no extra update step needed.
+   ---------------------------------------------------------------------------- */
+
+// 0..1 climb progress (floor 1 -> 22). Drives sky colour, clouds, birds, fades.
+function altitudeProgress() {
+  const floor = Game.moving ? Game.moving.floor :
+    (Game.score > 0 ? Game.score : Game.nextFloor);
+  return Math.min(1, Math.max(0, floor / CFG.TOTAL_FLOORS));
+}
+
+// Lerp two #rrggbb hex colours -> rgb() string. (Small, called a handful of
+// times per frame for gradient stops only.)
+function lerpHex(a, b, t) {
+  const ar = parseInt(a.slice(1, 3), 16), ag = parseInt(a.slice(3, 5), 16), ab = parseInt(a.slice(5, 7), 16);
+  const br = parseInt(b.slice(1, 3), 16), bg = parseInt(b.slice(3, 5), 16), bb = parseInt(b.slice(5, 7), 16);
+  const r = (ar + (br - ar) * t) | 0, g = (ag + (bg - ag) * t) | 0, bl = (ab + (bb - ab) * t) | 0;
+  return 'rgb(' + r + ',' + g + ',' + bl + ')';
+}
+
+// Pre-allocated background actor tables (built once). Positions computed live.
+const BG = {
+  cars: null,    // {lane, dir, speed, phase, color, len, h}
+  clouds: null,  // {layer, y, speed, scale, alpha, phase}
+  flocks: null,  // {y, speed, phase, n, size}
+  carColors: ['#3e5b6e', '#7a4a3a', '#5a6b4a', '#8a6a3a', '#4a4a5e', '#9c5536'],
+};
+
+function initBackground() {
+  // Cars: a few per direction, spread across phase so they don't clump.
+  const cars = [];
+  const carN = 6;
+  for (let i = 0; i < carN; i++) {
+    cars.push({
+      lane: i % 2,                              // 0 = near lane, 1 = far lane
+      dir: i % 2 === 0 ? 1 : -1,                // near lane -> right, far -> left
+      speed: 70 + (i * 37 % 60),               // world px/s, varied
+      phase: (i / carN) + (i * 0.13 % 0.5),    // 0..1 start offset along road
+      color: BG.carColors[i % BG.carColors.length],
+      len: 46 + (i * 7 % 18),
+    });
+  }
+  BG.cars = cars;
+
+  // Clouds: 3 depth layers, slow -> fast, far/faint -> near/brighter.
+  const clouds = [];
+  const layerCfg = [
+    { speed: 7,  scale: 0.85, alpha: 0.30, n: 3 },   // far, faint, high
+    { speed: 13, scale: 1.15, alpha: 0.42, n: 3 },   // mid
+    { speed: 22, scale: 1.55, alpha: 0.52, n: 2 },   // near, bigger
+  ];
+  for (let L = 0; L < layerCfg.length; L++) {
+    const c = layerCfg[L];
+    for (let i = 0; i < c.n; i++) {
+      clouds.push({
+        layer: L,
+        yFrac: 0.14 + L * 0.10 + (i * 0.17 % 0.18), // vertical band (frac of cssH)
+        speed: c.speed,
+        scale: c.scale,
+        alpha: c.alpha,
+        phase: (i / c.n) + L * 0.27,                  // 0..1 start offset
+      });
+    }
+  }
+  BG.clouds = clouds;
+
+  // Bird flocks crossing high up.
+  const flocks = [];
+  for (let i = 0; i < 3; i++) {
+    flocks.push({
+      yFrac: 0.10 + i * 0.07,
+      speed: 34 + i * 12,
+      phase: i / 3 + 0.1,
+      n: 3 + (i % 3),       // birds in the V
+      dir: i % 2 === 0 ? 1 : -1,
+    });
+  }
+  BG.flocks = flocks;
+}
+
+// ---- Layer 1: hero sky image (parallax pan) or code gradient fallback -------
+function drawSkyBackdrop(ctx, prog) {
+  const W = View.cssW, H = View.cssH;
+  if (Assets.skyHero && Assets.skyHero.loaded) {
+    // Cover-fit, then pan vertically with altitude (slow parallax). Showing the
+    // bottom of the image (horizon) low down, the top (high sky) when high up.
+    const img = Assets.skyHero;
+    const ir = img.width / img.height;
+    const cr = W / H;
+    let dw, dh;
+    if (cr > ir) { dw = W; dh = dw / ir; }
+    else { dh = H; dw = dh * ir; }
+    // Add extra vertical slack so there is room to pan.
+    const slackBoost = H * 0.5;
+    dh += slackBoost; dw = dh * ir;
+    const slackY = dh - H;
+    const dx = (W - dw) / 2;
+    // prog 0 -> show bottom (horizon); prog 1 -> show top (open sky).
+    const dy = -slackY * (1 - prog);
+    ctx.drawImage(img, dx, dy, dw, dh);
+    return;
+  }
+  // Code-drawn gradient fallback (THIS is the live path until sky_hero exists).
+  // Petrol night up top -> peach horizon at the base; brightens with altitude.
+  const top    = lerpHex('#14202e', '#2a4763', prog);   // dark petrol -> lit petrol
+  const mid    = lerpHex('#3a5c76', '#5e87a6', prog);   // petrol-blue -> brighter blue
+  const horizon= lerpHex('#b56a4a', '#f2d1b2', prog);   // terracotta dusk -> soft peach
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, top);
+  g.addColorStop(0.5, mid);
+  g.addColorStop(0.84, lerpHex('#e7b894', '#f2d1b2', prog));
+  g.addColorStop(1, horizon);
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+
+  // Warm low sun glow near the horizon; fades as we climb into clear sky.
+  const sunY = H * (0.78 - prog * 0.06);
+  const glow = (0.42 * (1 - prog * 0.7));
+  const sun = ctx.createRadialGradient(W * 0.5, sunY, 8, W * 0.5, sunY, W * 0.8);
+  sun.addColorStop(0, 'rgba(247,222,190,' + glow.toFixed(3) + ')');
+  sun.addColorStop(1, 'rgba(247,222,190,0)');
+  ctx.fillStyle = sun;
+  ctx.fillRect(0, 0, W, H);
+}
+
+// ---- Layer 2: far skyline silhouette band -----------------------------------
+function drawFarSkyline(ctx, prog) {
+  if (!(Assets.skyline && Assets.skyline.loaded)) return;
+  // Place the silhouette as a low horizon band that scrolls slightly with the
+  // camera (gentle parallax). Sits behind the ground scene.
+  const img = Assets.skyline;
+  const ir = img.width / img.height;
+  const bandH = Math.min(View.cssH * 0.32, View.cssW / ir);
+  const dw = View.cssW;
+  const dh = dw / ir;
+  // Horizon screen-y: where GROUND_Y maps, raised a touch. Parallax 0.18.
+  const horizonY = wy(CFG.GROUND_Y) - View.cssH * 0.06;
+  const dy = horizonY - dh + bandH * 0.0;
+  ctx.save();
+  ctx.globalAlpha = 0.55 * (1 - prog * 0.5);   // recedes as we climb past it
+  ctx.drawImage(img, (View.cssW - dw) / 2, dy, dw, dh);
+  ctx.restore();
+}
+
+// ---- Layer 3: ground scene (footpath, greenery, road, cars) -----------------
+// Anchored at GROUND_Y so it scrolls DOWN out of view as the tower rises.
+function drawGroundScene(ctx) {
+  const groundScreenY = wy(CFG.GROUND_Y);
+  // Cull if the ground has scrolled fully off the bottom.
+  if (groundScreenY - 40 > View.cssH) return;
+
+  const W = View.cssW;
+  const s = View.renderScale;
+  // Heights in world units -> screen via wlen for camera-correct scaling.
+  const roadH = wlen(120);
+  const pathH = wlen(34);
+  const roadTop = groundScreenY;            // road starts at ground line
+  const roadBot = groundScreenY + roadH;
+  const pathTop = roadBot;
+
+  ctx.save();
+
+  // Greenery strip + footpath just above the road (sits on the ground line).
+  // Trees/hedge silhouettes along the kerb.
+  drawGreenery(ctx, groundScreenY, s);
+
+  // Road surface (dark asphalt with petrol tint).
+  const rg = ctx.createLinearGradient(0, roadTop, 0, roadBot);
+  rg.addColorStop(0, '#2b3a44');
+  rg.addColorStop(1, '#1c272f');
+  ctx.fillStyle = rg;
+  ctx.fillRect(0, roadTop, W, roadH);
+
+  // Kerb highlight.
+  ctx.fillStyle = '#3d525e';
+  ctx.fillRect(0, roadTop, W, Math.max(1, wlen(3)));
+
+  // Lane dashes (centre line), scrolling subtly for life.
+  ctx.fillStyle = 'rgba(231,184,148,0.55)';
+  const dashW = wlen(34), gap = wlen(28), midY = roadTop + roadH * 0.5;
+  const off = (Game.fxTime * 40 * s) % (dashW + gap);
+  for (let x = -off; x < W; x += dashW + gap) {
+    ctx.fillRect(x, midY - wlen(2), dashW, wlen(4));
+  }
+
+  // Cars travelling horizontally across the road.
+  drawCars(ctx, roadTop, roadH, s);
+
+  // Footpath below the road (beige paving).
+  ctx.fillStyle = '#cdbb9a';
+  ctx.fillRect(0, pathTop, W, pathH);
+  ctx.fillStyle = 'rgba(31,42,46,0.18)';
+  ctx.fillRect(0, pathTop, W, Math.max(1, wlen(2)));
+  // paving joints
+  ctx.strokeStyle = 'rgba(31,42,46,0.15)';
+  ctx.lineWidth = 1;
+  const jw = wlen(40);
+  for (let x = (Game.fxTime * 0) % jw; x < W; x += jw) {
+    ctx.beginPath(); ctx.moveTo(x, pathTop); ctx.lineTo(x, pathTop + pathH); ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+// Tree / hedge silhouettes along the kerb above the road.
+function drawGreenery(ctx, groundScreenY, s) {
+  const W = View.cssW;
+  const baseY = groundScreenY + wlen(2);
+  ctx.save();
+  // dark silhouette tone matching palette
+  const hedgeH = wlen(26);
+  ctx.fillStyle = '#1c2e22';
+  ctx.fillRect(0, baseY - hedgeH, W, hedgeH);
+  // bumpy hedge top
+  ctx.fillStyle = '#243d2c';
+  const bump = wlen(22);
+  for (let x = 0; x < W + bump; x += bump) {
+    ctx.beginPath();
+    ctx.arc(x, baseY - hedgeH, bump * 0.6, Math.PI, 0);
+    ctx.fill();
+  }
+  // a few taller trees, evenly spaced, deterministic positions
+  const treeXs = [0.12, 0.34, 0.58, 0.8];
+  for (let i = 0; i < treeXs.length; i++) {
+    const tx = treeXs[i] * W;
+    const trunkH = wlen(30 + (i % 2) * 8);
+    const crownR = wlen(20 + (i % 3) * 5);
+    // trunk
+    ctx.fillStyle = '#2a1d14';
+    ctx.fillRect(tx - wlen(3), baseY - hedgeH - trunkH, wlen(6), trunkH);
+    // foliage (two-tone for a touch of depth)
+    ctx.fillStyle = '#1f3526';
+    ctx.beginPath();
+    ctx.arc(tx, baseY - hedgeH - trunkH, crownR, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#2c4a34';
+    ctx.beginPath();
+    ctx.arc(tx - crownR * 0.3, baseY - hedgeH - trunkH - crownR * 0.2, crownR * 0.7, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+// Cars moving horizontally across the road (positions from fxTime, no alloc).
+function drawCars(ctx, roadTop, roadH, s) {
+  if (!BG.cars) return;
+  const W = View.cssW;
+  const span = W + wlen(160);             // travel distance incl. off-screen margin
+  for (let i = 0; i < BG.cars.length; i++) {
+    const car = BG.cars[i];
+    const len = wlen(car.len);
+    const h = wlen(car.lane === 0 ? 26 : 21);    // near lane bigger
+    const laneY = car.lane === 0
+      ? roadTop + roadH * 0.66
+      : roadTop + roadH * 0.34;
+    // travel 0..1 looping, offset by phase
+    let t = (Game.fxTime * car.speed * s / span + car.phase) % 1;
+    if (t < 0) t += 1;
+    let x = car.dir > 0 ? (-wlen(160) + t * span) : (W + wlen(160) - t * span);
+    const y = laneY - h;
+    drawCar(ctx, x, y, len, h, car.color, car.dir);
+  }
+}
+
+function drawCar(ctx, x, y, w, h, color, dir) {
+  const r = Math.max(2, h * 0.18);
+  // body
+  ctx.fillStyle = color;
+  roundRect(ctx, x, y, w, h, r); ctx.fill();
+  // cabin (slightly lighter, offset toward travel direction)
+  ctx.fillStyle = 'rgba(255,255,255,0.16)';
+  const cw = w * 0.42, ch = h * 0.5;
+  const cx = dir > 0 ? x + w * 0.30 : x + w * 0.28;
+  roundRect(ctx, cx, y - ch * 0.45, cw, ch, r * 0.8); ctx.fill();
+  // windows
+  ctx.fillStyle = 'rgba(159,184,196,0.6)';
+  roundRect(ctx, cx + cw * 0.08, y - ch * 0.35, cw * 0.84, ch * 0.6, r * 0.5); ctx.fill();
+  // wheels
+  ctx.fillStyle = '#14202e';
+  const wr = h * 0.22;
+  ctx.beginPath(); ctx.arc(x + w * 0.24, y + h, wr, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(x + w * 0.76, y + h, wr, 0, Math.PI * 2); ctx.fill();
+  // headlight glow toward travel direction
+  ctx.fillStyle = 'rgba(247,222,190,0.85)';
+  const hx = dir > 0 ? x + w - Math.max(2, w * 0.06) : x;
+  ctx.fillRect(hx, y + h * 0.45, Math.max(2, w * 0.06), h * 0.22);
+}
+
+// ---- Layer 4: drifting parallax clouds --------------------------------------
+function drawClouds(ctx, prog) {
+  if (!BG.clouds) return;
+  // Clouds appear as we start climbing; thickest in mid-altitude, thinning as
+  // the sky "clears" near the very top.
+  const gate = Math.min(1, Math.max(0, (prog - 0.06) / 0.30));   // ramp in early
+  const clearOut = 1 - Math.max(0, (prog - 0.72) / 0.28) * 0.55; // thin near top
+  const vis = gate * clearOut;
+  if (vis <= 0.01) return;
+
+  const W = View.cssW, H = View.cssH;
+  const span = W + 360;
+  // Keep the central band (where the tower sits) calmer: clouds drawn but we
+  // dim any cloud whose centre is near mid-screen-x via a soft horizontal mask.
+  for (let i = 0; i < BG.clouds.length; i++) {
+    const cl = BG.clouds[i];
+    let t = (Game.fxTime * cl.speed / span + cl.phase) % 1;
+    if (t < 0) t += 1;
+    const x = -180 + t * span;
+    const y = H * cl.yFrac;
+    // central calm: reduce alpha when cloud centre is near the column centre.
+    const distFromCenter = Math.abs(x - W * 0.5) / (W * 0.5);
+    const centerDim = 0.45 + 0.55 * Math.min(1, distFromCenter); // 0.45..1
+    const a = cl.alpha * vis * centerDim;
+    if (a <= 0.01) continue;
+    drawCloud(ctx, x, y, cl.scale, a);
+  }
+}
+
+function drawCloud(ctx, x, y, scale, alpha) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = '#f2d1b2';                  // warm peach-white, on palette
+  const u = 22 * scale;                        // unit blob radius
+  // a soft puffy cloud from overlapping circles
+  ctx.beginPath();
+  ctx.arc(x,            y,          u,        0, Math.PI * 2);
+  ctx.arc(x + u * 1.1,  y - u*0.4,  u * 0.85, 0, Math.PI * 2);
+  ctx.arc(x + u * 2.1,  y,          u * 0.95, 0, Math.PI * 2);
+  ctx.arc(x + u * 1.0,  y + u*0.35, u * 1.05, 0, Math.PI * 2);
+  ctx.arc(x - u * 0.9,  y + u*0.2,  u * 0.7,  0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+// ---- Layer 5: bird flocks (animated "V" shapes) crossing the upper sky ------
+function drawBirds(ctx, prog) {
+  if (!BG.flocks) return;
+  const gate = Math.min(1, Math.max(0, (prog - 0.55) / 0.25));   // appear high up
+  if (gate <= 0.01) return;
+
+  const W = View.cssW, H = View.cssH;
+  const span = W + 240;
+  ctx.save();
+  ctx.strokeStyle = 'rgba(20,32,46,' + (0.7 * gate).toFixed(3) + ')';
+  ctx.lineCap = 'round';
+  for (let i = 0; i < BG.flocks.length; i++) {
+    const fl = BG.flocks[i];
+    let t = (Game.fxTime * fl.speed / span + fl.phase) % 1;
+    if (t < 0) t += 1;
+    const lead = fl.dir > 0 ? (-120 + t * span) : (W + 120 - t * span);
+    const y = H * fl.yFrac;
+    // gentle wave so the flock undulates
+    const wob = Math.sin(Game.fxTime * 1.2 + i) * 6;
+    for (let b = 0; b < fl.n; b++) {
+      // V formation: each bird trails back and to one side from the leader.
+      const side = (b % 2 === 0 ? 1 : -1) * Math.ceil(b / 2);
+      const bx = lead - fl.dir * Math.abs(side) * 16;
+      const by = y + Math.abs(side) * 9 + wob;
+      drawBird(ctx, bx, by, 9, Game.fxTime * 6 + b);
+    }
+  }
+  ctx.restore();
+}
+
+function drawBird(ctx, x, y, size, flap) {
+  // wing-flap: the V angle opens/closes a little over time.
+  const a = size * (0.7 + Math.sin(flap) * 0.18);
+  ctx.lineWidth = Math.max(1, size * 0.16);
+  ctx.beginPath();
+  ctx.moveTo(x - size, y + a * 0.4);
+  ctx.lineTo(x, y - a * 0.3);
+  ctx.lineTo(x + size, y + a * 0.4);
+  ctx.stroke();
+}
+
 function clearAndSky(ctx) {
   ctx.clearRect(0, 0, View.cssW, View.cssH);
-  if (Assets.skyline && Assets.skyline.loaded) {
-    // Cover-fit the skyline image.
-    const img = Assets.skyline;
-    const ir = img.width / img.height;
-    const cr = View.cssW / View.cssH;
-    let dw, dh;
-    if (cr > ir) { dw = View.cssW; dh = dw / ir; }
-    else { dh = View.cssH; dw = dh * ir; }
-    ctx.drawImage(img, (View.cssW - dw) / 2, (View.cssH - dh) / 2, dw, dh);
-  } else {
-    // Soft dusk gradient.
-    const g = ctx.createLinearGradient(0, 0, 0, View.cssH);
-    g.addColorStop(0, '#3a4f57');
-    g.addColorStop(0.45, '#6f7d76');
-    g.addColorStop(0.75, '#c39c7e');
-    g.addColorStop(1, '#e6c9a6');
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, View.cssW, View.cssH);
-    // faint sun glow
-    const sun = ctx.createRadialGradient(View.cssW * 0.5, View.cssH * 0.74, 10,
-                                         View.cssW * 0.5, View.cssH * 0.74, View.cssW * 0.7);
-    sun.addColorStop(0, 'rgba(255,238,210,0.45)');
-    sun.addColorStop(1, 'rgba(255,238,210,0)');
-    ctx.fillStyle = sun;
-    ctx.fillRect(0, 0, View.cssW, View.cssH);
-  }
+  const prog = altitudeProgress();
+  // 1. backdrop (hero image or code gradient) — panned/brightened with altitude
+  drawSkyBackdrop(ctx, prog);
+  // 2. far skyline silhouette band (optional)
+  drawFarSkyline(ctx, prog);
+  // 4. clouds drift in mid-altitude (drawn before ground so ground occludes
+  //    any low cloud as it scrolls up; birds sit highest)
+  drawClouds(ctx, prog);
+  drawBirds(ctx, prog);
+  // 3. ground scene at the base, scrolls DOWN out of view as the tower rises
+  drawGroundScene(ctx);
 }
 
 // Draw the podium base centered on the column.
@@ -1406,6 +1777,7 @@ function init() {
 
   bindInput();
   loadAssets();
+  initBackground();
 
   // Initial camera framing on the base for the start screen backdrop.
   View.cameraY = (CFG.GROUND_Y - CFG.BASE_DRAW_H) + 60;
