@@ -38,7 +38,7 @@ const CFG = {
   GROUND_Y: 0,            // base bottom anchored here; tower grows to -y.
 
   // Drawn floor height in world units (keep PNG aspect: 602x93).
-  FLOOR_DRAW_W: 560,      // starting tower-top width (floor 1 footprint width).
+  FLOOR_DRAW_W: 470,      // tower width (slimmer, leaves room for the crane beside it).
   get FLOOR_DRAW_H() { return this.FLOOR_DRAW_W * (this.FLOOR_H / this.FLOOR_W); },
 
   // Base draw width (podium is wider than the floors).
@@ -145,8 +145,9 @@ async function loadAssets() {
 
   // Branding agent assets — may not exist yet. Load with graceful fallback.
   Assets.skyline = loadImage('assets/bg/skyline.png');
-  // Hero sky is produced concurrently and MAY be absent — code-gradient covers it.
-  Assets.skyHero = loadImage('assets/bg/sky_hero.png');
+  // Sky is drawn as a realistic code gradient. To use a real photographic sky
+  // instead, drop a portrait image at assets/bg/sky_hero.png and re-enable:
+  // Assets.skyHero = loadImage('assets/bg/sky_hero.png');
   Assets.wordmark = loadImage('assets/logo/page22_wordmark.png');
   Assets.confetti = loadImage('assets/fx/confetti.png');
 
@@ -196,7 +197,9 @@ const View = {
 function resizeCanvas() {
   const stage = document.getElementById('stage');
   const rect = stage.getBoundingClientRect();
-  View.cssW = rect.width;
+  // Constrain to a PORTRAIT column so wide/desktop windows never stretch the
+  // scene (the crane/tower geometry is designed for portrait). #stage centers it.
+  View.cssW = Math.min(rect.width, rect.height * 0.62);
   View.cssH = rect.height;
   View.dpr = Math.min(window.devicePixelRatio || 1, 3);
 
@@ -765,26 +768,16 @@ function drawSkyBackdrop(ctx, prog) {
     ctx.drawImage(img, dx, dy, dw, dh);
     return;
   }
-  // Code-drawn gradient fallback (THIS is the live path until sky_hero exists).
-  // Petrol night up top -> peach horizon at the base; brightens with altitude.
-  const top    = lerpHex('#14202e', '#2a4763', prog);   // dark petrol -> lit petrol
-  const mid    = lerpHex('#3a5c76', '#5e87a6', prog);   // petrol-blue -> brighter blue
-  const horizon= lerpHex('#b56a4a', '#f2d1b2', prog);   // terracotta dusk -> soft peach
+  // Realistic blue daytime sky: deep blue up top -> soft pale-blue haze near the
+  // horizon. Brightens/clears a touch as you climb (subtle, stays real).
+  const top    = lerpHex('#2f6cae', '#3c7ec2', prog);   // clear blue
+  const mid    = lerpHex('#6aa0d2', '#82b4df', prog);   // mid sky
+  const horizon= lerpHex('#cfe2f2', '#e3eef9', prog);   // pale haze at horizon
   const g = ctx.createLinearGradient(0, 0, 0, H);
   g.addColorStop(0, top);
-  g.addColorStop(0.5, mid);
-  g.addColorStop(0.84, lerpHex('#e7b894', '#f2d1b2', prog));
+  g.addColorStop(0.55, mid);
   g.addColorStop(1, horizon);
   ctx.fillStyle = g;
-  ctx.fillRect(0, 0, W, H);
-
-  // Warm low sun glow near the horizon; fades as we climb into clear sky.
-  const sunY = H * (0.78 - prog * 0.06);
-  const glow = (0.42 * (1 - prog * 0.7));
-  const sun = ctx.createRadialGradient(W * 0.5, sunY, 8, W * 0.5, sunY, W * 0.8);
-  sun.addColorStop(0, 'rgba(247,222,190,' + glow.toFixed(3) + ')');
-  sun.addColorStop(1, 'rgba(247,222,190,0)');
-  ctx.fillStyle = sun;
   ctx.fillRect(0, 0, W, H);
 }
 
@@ -983,16 +976,22 @@ function drawClouds(ctx, prog) {
 function drawCloud(ctx, x, y, scale, alpha) {
   ctx.save();
   ctx.globalAlpha = alpha;
-  ctx.fillStyle = '#f2d1b2';                  // warm peach-white, on palette
-  const u = 22 * scale;                        // unit blob radius
-  // a soft puffy cloud from overlapping circles
-  ctx.beginPath();
-  ctx.arc(x,            y,          u,        0, Math.PI * 2);
-  ctx.arc(x + u * 1.1,  y - u*0.4,  u * 0.85, 0, Math.PI * 2);
-  ctx.arc(x + u * 2.1,  y,          u * 0.95, 0, Math.PI * 2);
-  ctx.arc(x + u * 1.0,  y + u*0.35, u * 1.05, 0, Math.PI * 2);
-  ctx.arc(x - u * 0.9,  y + u*0.2,  u * 0.7,  0, Math.PI * 2);
-  ctx.fill();
+  const u = 26 * scale;                        // unit puff radius
+  // Soft, realistic white cloud: overlapping radial-gradient puffs with feathered
+  // edges and a faint cooler underside.
+  const puffs = [
+    [0.0,  0.10, 1.00], [1.2, -0.30, 0.86], [2.3, 0.05, 0.96],
+    [1.1,  0.42, 1.08], [-1.0, 0.26, 0.72], [0.4, -0.18, 0.90],
+  ];
+  for (const [dx, dy, r] of puffs) {
+    const cx = x + dx * u, cy = y + dy * u, rad = u * r;
+    const g = ctx.createRadialGradient(cx, cy - rad * 0.2, rad * 0.15, cx, cy, rad);
+    g.addColorStop(0,   'rgba(255,255,255,0.97)');
+    g.addColorStop(0.6, 'rgba(247,251,255,0.78)');
+    g.addColorStop(1,   'rgba(232,241,250,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(cx, cy, rad, 0, Math.PI * 2); ctx.fill();
+  }
   ctx.restore();
 }
 
@@ -1042,8 +1041,6 @@ function clearAndSky(ctx) {
   const prog = altitudeProgress();
   // 1. backdrop (hero image or code gradient) — panned/brightened with altitude
   drawSkyBackdrop(ctx, prog);
-  // 2. far skyline silhouette band (optional)
-  drawFarSkyline(ctx, prog);
   // 4. clouds drift in mid-altitude (drawn before ground so ground occludes
   //    any low cloud as it scrolls up; birds sit highest)
   drawClouds(ctx, prog);
@@ -1111,7 +1108,7 @@ function drawCrane(ctx) {
   ctx.globalAlpha = awayAlpha;
 
   const jibScreenY = wy(jibY) - awayShift;          // bottom chord of the jib
-  const mastX = wx(-CFG.WORLD_W * 0.42);            // crane stands to the left
+  const mastX = wx(-CFG.WORLD_W * 0.46);            // crane stands clear to the left of the tower
   const jibRight = wx(CFG.JIB_LEN * 0.62);          // working arm over the load
   const counterLeft = mastX - wlen(CFG.COUNTERJIB_LEN);
 
@@ -1140,6 +1137,21 @@ function drawCrane(ctx) {
     if (zig) { ctx.moveTo(mastX - half, yy); ctx.lineTo(mastX + half, yy + step); }
     else     { ctx.moveTo(mastX + half, yy); ctx.lineTo(mastX - half, yy + step); }
     ctx.stroke(); zig = !zig;
+  }
+
+  // ---- Concrete foundation where the mast is mounted (visible near ground) --
+  const groundY = wy(CFG.GROUND_Y);
+  if (groundY < bottomOfView + 40 && groundY > -120) {
+    const padW = half * 5.2, padH = Math.max(12, wlen(40));
+    ctx.fillStyle = '#4f5961';                         // concrete block
+    ctx.fillRect(mastX - padW / 2, groundY - padH * 0.45, padW, padH);
+    ctx.fillStyle = 'rgba(20,28,34,0.35)';             // shaded base
+    ctx.fillRect(mastX - padW / 2, groundY + padH * 0.25, padW, padH * 0.3);
+    ctx.fillStyle = '#6b757c';                         // lit top edge
+    ctx.fillRect(mastX - padW / 2, groundY - padH * 0.45, padW, Math.max(2, wlen(3)));
+    // steel collar where the mast seats into the footing
+    ctx.fillStyle = STEEL_DK;
+    ctx.fillRect(mastX - half * 1.5, groundY - padH * 0.45 - wlen(7), half * 3, wlen(9));
   }
 
   // ---- A-frame apex (tower top) over the mast ------------------------------
