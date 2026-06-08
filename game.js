@@ -52,12 +52,12 @@ const CFG = {
   COUNTERJIB_LEN: 150,
 
   // Pendulum tuning (difficulty ramps with floor number).
-  SWING_AMP_MIN: 0.18,    // radians at floor 1 (~10 deg)
-  SWING_AMP_MAX: 0.62,    // radians near floor 22 (~36 deg)
-  SWING_OMEGA_MIN: 1.25,  // rad/s
-  SWING_OMEGA_MAX: 2.55,
-  TROLLEY_DRIFT: 26,      // px of slow trolley traverse for extra life
-  TROLLEY_OMEGA: 0.55,
+  SWING_AMP_MIN: 0.30,    // radians at floor 1 (wider, harder)
+  SWING_AMP_MAX: 0.92,    // radians near floor 22 (~53 deg)
+  SWING_OMEGA_MIN: 2.05,  // rad/s  (fast left-right)
+  SWING_OMEGA_MAX: 4.30,
+  TROLLEY_DRIFT: 42,      // px of trolley traverse (more lateral coverage)
+  TROLLEY_OMEGA: 0.8,
 
   // Drop physics.
   GRAVITY: 2600,          // world px / s^2
@@ -65,10 +65,13 @@ const CFG = {
   MAX_FALL_VX: 900,
 
   // Placement rules.
-  PERFECT_TOL: 7,         // center within this many px = perfect (no trim)
-  MIN_WIDTH: 26,          // below this the slab is essentially gone (still alive)
-  PERFECT_REGRANT: 8,     // px width regranted per perfect on a streak
-  REGRANT_STREAK: 2,      // perfects in a row before regrant kicks in
+  PERFECT_TOL: 9,         // |offset| within this = a "perfect" (combo + recovery)
+  // --- Stability model (floors are NEVER trimmed/shrunk; off-centre hurts stability) ---
+  STAB_MAX: 100,          // full, brand-new building
+  LOSE_THRESHOLD: 60,     // at or below 60% stability the run ends (retry)
+  STAB_SAFE: 14,          // |offset| under this does no damage
+  STAB_DMG_SCALE: 62,     // damage for an offset of one full floor width
+  STAB_RECOVER: 5,        // stability regained on a perfect placement
 
   // Camera.
   CAM_LERP: 4.2,          // higher = snappier follow
@@ -180,9 +183,11 @@ const View = {
   dpr: 1,
   cssW: 0,
   cssH: 0,
-  scale: 1,        // world px -> screen px
+  scale: 1,        // base gameplay world px -> screen px (set on resize)
+  renderScale: 1,  // active scale used by transforms (lerps out for the win reveal)
   originX: 0,      // screen x of world x=0 (column center)
   cameraY: 0,      // world y currently centered-ish in frame
+  anchorY: 0,      // screen y that cameraY maps to (lerps up for the win reveal)
 };
 
 function resizeCanvas() {
@@ -204,17 +209,20 @@ function resizeCanvas() {
   // but never scale so tall that vertical play feels cramped.
   const targetW = Math.min(View.cssW, View.cssH * 0.62); // keep portrait-ish
   View.scale = targetW / CFG.WORLD_W;
+  if (Game.state === STATE.START || Game.state === STATE.PLAYING ||
+      Game.state === STATE.DROPPING || Game.state === STATE.SETTLE) {
+    View.renderScale = View.scale;       // snap during normal play
+    View.anchorY = View.cssH * 0.62;
+  }
   View.originX = View.cssW / 2; // world x=0 is the column center
 }
 
-// World coords -> screen CSS px.
-function wx(worldX) { return View.originX + worldX * View.scale; }
+// World coords -> screen CSS px. renderScale/anchorY lerp during the win reveal.
+function wx(worldX) { return View.originX + worldX * View.renderScale; }
 function wy(worldY) {
-  // Place cameraY around 62% down the screen so the tower top has headroom.
-  const anchor = View.cssH * 0.62;
-  return anchor + (worldY - View.cameraY) * View.scale;
+  return View.anchorY + (worldY - View.cameraY) * View.renderScale;
 }
-function wlen(v) { return v * View.scale; }
+function wlen(v) { return v * View.renderScale; }
 
 /* ============================================================================
    4. GAME STATE + BLOCK MODEL
@@ -240,7 +248,10 @@ const Game = {
   combo: 0,            // perfect streak
   bestCombo: 0,
   score: 0,            // floors completed
+  stability: 100,      // building stability (0 = collapse). Shown top-right.
+  stabShown: 100,      // smoothed value for the bar animation
   time: 0,             // accumulated game time (s) for pendulum phase
+  fxTime: 0,           // always-advancing clock for wobble / fx
 
   // The currently hooked / falling floor.
   moving: null,        // {floor, x, y, w, vx, vy, swayPhase, swayAmp}
@@ -273,8 +284,12 @@ function startGame() {
   Game.offcuts = [];
   Game.flashes = [];
   Game.confetti = [];
+  AudioFX.stopParty();
   Game.combo = 0;
+  Game.bestCombo = 0;
   Game.score = 0;
+  Game.stability = CFG.STAB_MAX;
+  Game.stabShown = CFG.STAB_MAX;
   Game.time = 0;
   Game.pulse = 0;
   Game.nextFloor = 1;
@@ -408,92 +423,46 @@ function landingReference() {
   return { cx: top.cx, w: top.w };
 }
 
-// Compute overlap, trim/shrink, place the slab, spawn the offcut, or LOSE.
+// Place the slab at FULL width (never trimmed); off-centre drains stability.
 function resolvePlacement() {
   const m = Game.moving;
-  const ref = landingReference();
+  const ref = landingReference();             // centre of the floor/base below
+  const absOff = Math.abs(m.x - ref.cx);
 
-  const movLeft = m.x - m.w / 2;
-  const movRight = m.x + m.w / 2;
-  const refLeft = ref.cx - ref.w / 2;
-  const refRight = ref.cx + ref.w / 2;
-
-  const overlapLeft = Math.max(movLeft, refLeft);
-  const overlapRight = Math.min(movRight, refRight);
-  const overlap = overlapRight - overlapLeft;
-
-  // SUDDEN DEATH: no overlap at all -> the slab missed entirely.
-  // Let projectile motion carry it PAST the tower; the fall-past guard in
-  // stepPhysics (m.y > GROUND_Y + 400) then triggers game over.
-  if (overlap <= 0) {
-    m.missed = true;
-    m.vy = Math.max(m.vy, 360);
-    Game.state = STATE.DROPPING;
-    return;
-  }
-
-  const centerDelta = Math.abs(m.x - ref.cx);
-  let placedW = overlap;
-  let placedCx = (overlapLeft + overlapRight) / 2;
-  let perfect = false;
-
-  // PERFECT: center within tolerance AND near full current width.
-  if (centerDelta <= CFG.PERFECT_TOL) {
-    perfect = true;
-    // No trim — keep the moving floor's full width, snap onto reference center.
-    placedW = m.w;
-    placedCx = ref.cx;
-    Game.combo += 1;
-    Game.bestCombo = Math.max(Game.bestCombo, Game.combo);
-
-    // Regrant a few px on a streak (capped at original FLOOR_DRAW_W).
-    if (Game.combo >= CFG.REGRANT_STREAK) {
-      placedW = Math.min(CFG.FLOOR_DRAW_W, placedW + CFG.PERFECT_REGRANT);
-    }
-    Game.pulse = 1;
-    Game.flashes.push({ x: placedCx, y: towerTopY() - m.h / 2, t: 0 });
-  } else {
-    Game.combo = 0;
-  }
-
-  // Map the placed world-range back into the MOVING block's OWN u-range.
-  // The moving block displays floor PNG N across [0,1] over [movLeft,movRight].
-  let u0, u1;
-  if (perfect) {
-    // Perfect keeps full PNG, but may have regranted width beyond the slab;
-    // center the full [0,1] on placedCx at placedW.
-    u0 = 0; u1 = 1;
-  } else {
-    u0 = (overlapLeft - movLeft) / m.w;
-    u1 = (overlapRight - movLeft) / m.w;
-    u0 = Math.max(0, Math.min(1, u0));
-    u1 = Math.max(0, Math.min(1, u1));
-  }
-
-  // Place the block. topY is the world-y of its TOP surface.
+  // Place the full-width floor exactly where it landed — NEVER cut, NEVER shrunk.
   const placedTopY = towerTopY() - m.h;
-  const block = {
+  Game.blocks.push({
     floor: m.floor,
-    cx: placedCx,
-    w: placedW,
+    cx: m.x,
+    w: m.w,
     h: m.h,
     topY: placedTopY,
     botY: placedTopY + m.h,
-    u0, u1,
+    u0: 0, u1: 1,                             // always the whole floor PNG
     imgIndex: m.floor - 1,
-  };
-  Game.blocks.push(block);
-  // Keep a minimum buildable top so an ultra-thin sliver doesn't end the run
-  // outright (sudden death is reserved for an actual full miss).
-  Game.topWidth = Math.max(CFG.MIN_WIDTH, placedW);
+  });
   Game.score = m.floor;
 
-  // Spawn the tumbling offcut(s) for trimmed overhang.
-  if (!perfect && overlap < m.w - 0.5) {
-    spawnOffcuts(m, ref, overlapLeft, overlapRight, placedTopY);
+  // Stability: a centred drop is safe (and recovers a little); the further
+  // off-centre, the more the building's stability drains.
+  if (absOff <= CFG.PERFECT_TOL) {
+    Game.combo += 1;
+    Game.bestCombo = Math.max(Game.bestCombo, Game.combo);
+    Game.stability = Math.min(CFG.STAB_MAX, Game.stability + CFG.STAB_RECOVER);
+    Game.pulse = 1;
+    Game.flashes.push({ x: m.x, y: placedTopY + m.h / 2, t: 0 });
+    AudioFX.perfect();
+  } else {
+    Game.combo = 0;
+    const dmg = Math.max(0, absOff - CFG.STAB_SAFE) / m.w * CFG.STAB_DMG_SCALE;
+    Game.stability = Math.max(0, Game.stability - dmg);
+    AudioFX.place();
   }
 
-  // WIN or continue.
+  // Stability too low -> end the run (we never show the building fall).
+  if (Game.stability <= CFG.LOSE_THRESHOLD) { triggerLose(); return; }
+
+  // WIN at the top, else queue the next floor.
   if (m.floor >= CFG.TOTAL_FLOORS) {
     beginWinSequence();
   } else {
@@ -542,6 +511,7 @@ function triggerLose() {
   if (Game.state === STATE.LOSE) return;
   Game.state = STATE.LOSE;
   Game.moving = null;
+  AudioFX.lose();
 }
 
 /* ============================================================================
@@ -574,7 +544,7 @@ function stepWinSequence(dt) {
     const p = Math.min(1, Game.seqT / 1.3);
     const e = 1 - Math.pow(1 - p, 3);
     Game.crownY = Game.crownStartY + (Game.crownTargetY - Game.crownStartY) * e;
-    if (p >= 1) { Game.seqStage = 2; Game.seqT = 0; spawnConfetti(); }
+    if (p >= 1) { Game.seqStage = 2; Game.seqT = 0; spawnConfetti(); AudioFX.startParty(); }
   } else if (Game.seqStage === 2) {
     // Camera pulls back to reveal full tower (handled in updateCamera).
     if (Game.seqT >= 1.2) { Game.seqStage = 3; Game.seqT = 0; Game.state = STATE.WIN_OVERLAY; }
@@ -604,26 +574,51 @@ function spawnConfetti() {
    ========================================================================== */
 
 function updateCamera(dt) {
-  let target;
-  if (Game.state === STATE.WIN_SEQ && Game.seqStage >= 2 ||
-      Game.state === STATE.WIN_OVERLAY) {
-    // Pull back: frame the whole tower (mid-point of base-to-top).
-    const topY = towerTopY();
-    const mid = (topY + (CFG.GROUND_Y - CFG.BASE_DRAW_H)) / 2;
-    target = mid;
-    // Also zoom out a touch by lerping scale handled below.
-    View._winZoom = true;
+  let targetCam, targetScale, targetAnchor;
+  const revealFull = (Game.state === STATE.WIN_SEQ && Game.seqStage >= 2) ||
+                     Game.state === STATE.WIN_OVERLAY || Game.state === STATE.LOSE;
+
+  if (revealFull) {
+    // Pull back so the ENTIRE tower is on screen (base -> all floors -> crown),
+    // framed in the upper area with room for the end-screen card below.
+    const isWin = Game.state !== STATE.LOSE;
+    const crownH = isWin ? CFG.FLOOR_DRAW_W * 1.18 * (368 / 700) : 0;
+    const towerTop = towerTopY() - crownH;          // top of structure (world y, negative)
+    const towerBot = CFG.GROUND_Y;                  // base bottom
+    const towerH = Math.max(1, towerBot - towerTop);
+    const avail = View.cssH * 0.52;                 // vertical room for the tower
+    targetScale = Math.min(View.scale, avail / towerH);
+    targetCam = (towerTop + towerBot) / 2;          // tower mid-point
+    targetAnchor = View.cssH * 0.36;                // centre tower in the upper area
   } else {
     // Follow the active build region: keep crane + tower top in frame.
-    const topY = towerTopY();
-    target = topY - CFG.CRANE_CLEARANCE * 0.55;
-    View._winZoom = false;
+    targetCam = towerTopY() - CFG.CRANE_CLEARANCE * 0.55;
+    targetScale = View.scale;
+    targetAnchor = View.cssH * 0.62;
   }
+
   const k = 1 - Math.exp(-CFG.CAM_LERP * dt);
-  View.cameraY += (target - View.cameraY) * k;
+  View.cameraY += (targetCam - View.cameraY) * k;
+  View.renderScale += (targetScale - View.renderScale) * k;
+  View.anchorY += (targetAnchor - View.anchorY) * k;
+
+  // Smooth the stability bar toward its true value.
+  Game.stabShown += (Game.stability - Game.stabShown) * (1 - Math.exp(-8 * dt));
+}
+
+// Building lean/wobble that grows as stability falls toward the 60% line.
+function wobbleAngle() {
+  if (Game.state !== STATE.PLAYING && Game.state !== STATE.DROPPING &&
+      Game.state !== STATE.SETTLE) return 0;
+  const span = CFG.STAB_MAX - CFG.LOSE_THRESHOLD;     // 40 pts of headroom
+  const instab = Math.max(0, Math.min(1, (CFG.STAB_MAX - Game.stabShown) / span));
+  if (instab <= 0.02) return 0;
+  const amp = instab * instab * 0.06;                  // up to ~3.4 deg, eases in
+  return amp * Math.sin(Game.fxTime * 5.0);
 }
 
 function updateFx(dt) {
+  Game.fxTime += dt;
   // Offcuts.
   for (const o of Game.offcuts) {
     o.vy += CFG.GRAVITY * 0.6 * dt;
@@ -744,78 +739,110 @@ function drawCrane(ctx) {
   ctx.save();
   ctx.globalAlpha = awayAlpha;
 
-  const jibScreenY = wy(jibY) - awayShift;
-  const mastX = wx(-CFG.WORLD_W * 0.42); // mast off to the left
-  const jibLeft = mastX;
-  const jibRight = wx(CFG.JIB_LEN * 0.55);
+  const jibScreenY = wy(jibY) - awayShift;          // bottom chord of the jib
+  const mastX = wx(-CFG.WORLD_W * 0.42);            // crane stands to the left
+  const jibRight = wx(CFG.JIB_LEN * 0.62);          // working arm over the load
   const counterLeft = mastX - wlen(CFG.COUNTERJIB_LEN);
 
-  // Mast (vertical lattice) from jib up off the top of screen.
-  ctx.strokeStyle = COL.craneInk;
-  ctx.lineWidth = Math.max(3, wlen(10));
+  const STEEL = '#f2b50e';                          // construction yellow
+  const STEEL_LT = '#ffd64a';                        // lit edge of the steelwork
+  const STEEL_DK = '#caa017';                        // shaded yellow
+  const half = Math.max(5, wlen(13));               // half-width of the lattice chords
+  const lw = (v) => Math.max(1, wlen(v));
+  const bottomOfView = View.cssH + 40;
+
+  // ---- Tower mast: two chords rising from below, rungs + X-bracing ----------
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = STEEL;
+  ctx.lineWidth = lw(5.5);
   ctx.beginPath();
-  ctx.moveTo(mastX, jibScreenY);
-  ctx.lineTo(mastX, -40);
+  ctx.moveTo(mastX - half, jibScreenY); ctx.lineTo(mastX - half, bottomOfView);
+  ctx.moveTo(mastX + half, jibScreenY); ctx.lineTo(mastX + half, bottomOfView);
   ctx.stroke();
-  // mast cross-bracing
-  ctx.lineWidth = Math.max(1, wlen(2.5));
-  for (let yy = jibScreenY; yy > -40; yy -= wlen(28)) {
+  ctx.lineWidth = lw(2.2);
+  const step = Math.max(14, wlen(34));
+  let zig = true;
+  for (let yy = jibScreenY; yy < bottomOfView; yy += step) {
+    ctx.beginPath();                                // horizontal rung
+    ctx.moveTo(mastX - half, yy); ctx.lineTo(mastX + half, yy); ctx.stroke();
+    ctx.beginPath();                                // alternating diagonal
+    if (zig) { ctx.moveTo(mastX - half, yy); ctx.lineTo(mastX + half, yy + step); }
+    else     { ctx.moveTo(mastX + half, yy); ctx.lineTo(mastX - half, yy + step); }
+    ctx.stroke(); zig = !zig;
+  }
+
+  // ---- A-frame apex (tower top) over the mast ------------------------------
+  const apexX = mastX, apexY = jibScreenY - Math.max(28, wlen(78));
+  ctx.strokeStyle = STEEL; ctx.lineWidth = lw(4);
+  ctx.beginPath();
+  ctx.moveTo(mastX - half, jibScreenY); ctx.lineTo(apexX, apexY);
+  ctx.lineTo(mastX + half, jibScreenY); ctx.stroke();
+
+  // ---- Jib (working arm) + counter-jib: bottom + top chords + web ----------
+  const topOff = Math.max(10, wlen(26));
+  // bottom chords
+  ctx.strokeStyle = STEEL; ctx.lineWidth = lw(5);
+  ctx.beginPath();
+  ctx.moveTo(counterLeft, jibScreenY); ctx.lineTo(jibRight, jibScreenY); ctx.stroke();
+  // top chords taper to the tips
+  ctx.lineWidth = lw(3);
+  ctx.beginPath();
+  ctx.moveTo(counterLeft, jibScreenY);
+  ctx.lineTo(mastX, jibScreenY - topOff);
+  ctx.lineTo(jibRight - wlen(30), jibScreenY - topOff);
+  ctx.lineTo(jibRight, jibScreenY); ctx.stroke();
+  // web diagonals along the working arm
+  ctx.lineWidth = lw(1.6);
+  const segs = 7;
+  for (let i = 0; i < segs; i++) {
+    const x0 = mastX + (jibRight - mastX) * (i / segs);
+    const x1 = mastX + (jibRight - mastX) * ((i + 1) / segs);
     ctx.beginPath();
-    ctx.moveTo(mastX - wlen(5), yy);
-    ctx.lineTo(mastX + wlen(5), yy - wlen(14));
-    ctx.moveTo(mastX + wlen(5), yy);
-    ctx.lineTo(mastX - wlen(5), yy - wlen(14));
-    ctx.stroke();
+    ctx.moveTo(x0, jibScreenY); ctx.lineTo(x1, jibScreenY - topOff); ctx.stroke();
   }
-
-  // Jib (working arm) + counter-jib.
-  ctx.lineWidth = Math.max(3, wlen(8));
-  ctx.strokeStyle = COL.craneInk;
+  // pendant tie cables from apex to both tips
+  ctx.strokeStyle = STEEL_LT; ctx.lineWidth = lw(1.4);
   ctx.beginPath();
-  ctx.moveTo(counterLeft, jibScreenY);
-  ctx.lineTo(jibRight, jibScreenY);
+  ctx.moveTo(apexX, apexY); ctx.lineTo(jibRight - wlen(30), jibScreenY - topOff);
+  ctx.moveTo(apexX, apexY); ctx.lineTo(counterLeft, jibScreenY - topOff * 0.5);
   ctx.stroke();
-  // jib top chord (triangle truss to a small apex over the mast)
-  const apexY = jibScreenY - wlen(46);
-  ctx.lineWidth = Math.max(2, wlen(4));
-  ctx.beginPath();
-  ctx.moveTo(counterLeft, jibScreenY);
-  ctx.lineTo(mastX, apexY);
-  ctx.lineTo(jibRight, jibScreenY);
-  ctx.stroke();
-  // truss verticals
-  ctx.lineWidth = Math.max(1, wlen(2));
-  for (let t = 0.15; t < 1; t += 0.18) {
-    const xr = mastX + (jibRight - mastX) * t;
-    const yr = apexY + (jibScreenY - apexY) * t;
-    ctx.beginPath(); ctx.moveTo(xr, jibScreenY); ctx.lineTo(xr, yr); ctx.stroke();
-  }
 
-  // Counterweight block.
+  // ---- Operator cab under the jib root -------------------------------------
+  const cabW = Math.max(16, wlen(30)), cabH = Math.max(14, wlen(26));
+  ctx.fillStyle = STEEL;
+  ctx.fillRect(mastX - cabW / 2, jibScreenY + lw(2), cabW, cabH);
+  ctx.fillStyle = 'rgba(180,205,220,0.8)';          // window glass
+  ctx.fillRect(mastX - cabW / 2 + lw(3), jibScreenY + lw(5), cabW - lw(6), cabH * 0.5);
+
+  // ---- Counterweight block (with a restrained terracotta stripe) -----------
+  const cwW = Math.max(20, wlen(52)), cwH = Math.max(16, wlen(40));
   ctx.fillStyle = COL.inkSoft;
-  const cwW = wlen(46), cwH = wlen(30);
-  ctx.fillRect(counterLeft - cwW / 2, jibScreenY - cwH / 2, cwW, cwH);
-
-  // Trolley (rides the jib above the slab) + cable + hook + slab.
-  const trolleyScreenX = wx(pivotX);
+  ctx.fillRect(counterLeft - cwW / 2, jibScreenY - cwH * 0.5, cwW, cwH);
   ctx.fillStyle = COL.terracottaDeep;
-  ctx.fillRect(trolleyScreenX - wlen(14), jibScreenY - wlen(4), wlen(28), wlen(12));
+  ctx.fillRect(counterLeft - cwW / 2, jibScreenY + cwH * 0.18, cwW, cwH * 0.16);
 
-  // Cable to the hooked slab (only while attached: PLAYING).
+  // ---- Trolley carriage on the bottom chord --------------------------------
+  const trolleyScreenX = wx(pivotX);
+  ctx.fillStyle = STEEL;
+  ctx.fillRect(trolleyScreenX - wlen(15), jibScreenY - lw(3), wlen(30), lw(11));
+  ctx.fillStyle = STEEL_LT;
+  ctx.fillRect(trolleyScreenX - wlen(15), jibScreenY - lw(3), wlen(30), lw(3));
+
+  // ---- Cable + hook block + (slab drawn elsewhere) -------------------------
   if (m && Game.state === STATE.PLAYING) {
     const slabTopScreenY = wy(m.y);
     const slabScreenX = wx(m.x);
-    ctx.strokeStyle = COL.craneInk;
-    ctx.lineWidth = Math.max(1.5, wlen(2.5));
+    ctx.strokeStyle = STEEL; ctx.lineWidth = lw(2);
+    // two hoist lines for a beefier look
     ctx.beginPath();
-    ctx.moveTo(trolleyScreenX, jibScreenY + wlen(8));
-    ctx.lineTo(slabScreenX, slabTopScreenY - wlen(6));
+    ctx.moveTo(trolleyScreenX - wlen(4), jibScreenY + lw(6));
+    ctx.lineTo(slabScreenX - wlen(3), slabTopScreenY - wlen(8));
+    ctx.moveTo(trolleyScreenX + wlen(4), jibScreenY + lw(6));
+    ctx.lineTo(slabScreenX + wlen(3), slabTopScreenY - wlen(8));
     ctx.stroke();
-    // hook
-    ctx.beginPath();
-    ctx.arc(slabScreenX, slabTopScreenY - wlen(3), wlen(4), 0, Math.PI * 2);
-    ctx.fillStyle = COL.craneInk;
-    ctx.fill();
+    // hook block
+    ctx.fillStyle = STEEL;
+    ctx.fillRect(slabScreenX - wlen(6), slabTopScreenY - wlen(10), wlen(12), wlen(8));
   }
 
   ctx.restore();
@@ -893,13 +920,16 @@ function drawHUD(ctx) {
   ctx.fillStyle = 'rgba(243,234,217,0.7)';
   ctx.fillText(`/ ${CFG.TOTAL_FLOORS}`, pad + 44, pad + 30);
 
-  // Combo (top-right).
+  // Stability meter (top-right) — how win/lose is communicated.
+  const barW = 132, barH = 12;
+  drawStabilityBar(ctx, View.cssW - pad - barW, pad + 2, barW, barH,
+                   Game.stabShown / CFG.STAB_MAX, true);
+
+  // Combo, tucked under the floor counter (left).
   if (Game.combo >= 2) {
-    ctx.textAlign = 'right';
     ctx.fillStyle = COL.terracotta;
-    ctx.font = '800 22px "Helvetica Neue", Arial, sans-serif';
-    ctx.fillText(`PERFECT  x${Game.combo}`, View.cssW - pad, pad + 4);
-    ctx.textAlign = 'left';
+    ctx.font = '800 15px "Helvetica Neue", Arial, sans-serif';
+    ctx.fillText(`PERFECT x${Game.combo}`, pad, pad + 44);
   }
 
   // Thin blueprint rule across the top.
@@ -933,6 +963,46 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.arcTo(x, y + h, x, y, r);
   ctx.arcTo(x, y, x + w, y, r);
   ctx.closePath();
+}
+
+// Stability meter: green (sound) -> amber -> red (near the 60% collapse line).
+function stabColor(frac) {
+  if (frac > 0.80) return '#5fa873';
+  if (frac > 0.68) return '#d7a23e';
+  return '#c0523b';
+}
+
+// Draw the stability bar. hud=true: light-on-dark for the in-game corner;
+// hud=false: ink-on-paper, centred, for the end-screen panels.
+function drawStabilityBar(ctx, x, y, w, h, frac, hud) {
+  frac = Math.max(0, Math.min(1, frac));
+  ctx.save();
+  ctx.textBaseline = 'alphabetic';
+  const labelX = hud ? x + w : x + w / 2;
+  ctx.textAlign = hud ? 'right' : 'center';
+  ctx.font = '700 10px "Helvetica Neue", Arial, sans-serif';
+  ctx.fillStyle = hud ? 'rgba(243,234,217,0.85)' : 'rgba(31,42,46,0.7)';
+  ctx.fillText('S T A B I L I T Y', labelX, y - 5);
+  // track
+  ctx.fillStyle = hud ? 'rgba(243,234,217,0.16)' : 'rgba(31,42,46,0.10)';
+  roundRect(ctx, x, y, w, h, h / 2); ctx.fill();
+  // fill
+  ctx.fillStyle = stabColor(frac);
+  roundRect(ctx, x, y, Math.max(h, w * frac), h, h / 2); ctx.fill();
+  // danger line at the 60% collapse threshold
+  const tx = x + w * (CFG.LOSE_THRESHOLD / CFG.STAB_MAX);
+  ctx.strokeStyle = hud ? 'rgba(243,234,217,0.65)' : 'rgba(31,42,46,0.5)';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(tx, y - 2); ctx.lineTo(tx, y + h + 2); ctx.stroke();
+  // outline
+  ctx.strokeStyle = hud ? 'rgba(243,234,217,0.35)' : 'rgba(31,42,46,0.35)';
+  ctx.lineWidth = 1;
+  roundRect(ctx, x, y, w, h, h / 2); ctx.stroke();
+  // value
+  ctx.font = '800 11px "Helvetica Neue", Arial, sans-serif';
+  ctx.fillStyle = hud ? COL.paper : COL.ink;
+  ctx.fillText(Math.round(frac * 100) + '%', labelX, y + h + 13);
+  ctx.restore();
 }
 
 // Buttons live as screen-space rects we hit-test in the input handler.
@@ -1009,84 +1079,98 @@ function drawStartScreen(ctx) {
 }
 
 function drawLoseScreen(ctx) {
-  ctx.fillStyle = 'rgba(20,28,31,0.55)';
+  // Light scrim so the collapsed tower stays visible above the card.
+  ctx.fillStyle = 'rgba(20,28,31,0.30)';
   ctx.fillRect(0, 0, View.cssW, View.cssH);
   const w = Math.min(340, View.cssW - 40);
-  const h = 240;
+  const h = 286;
   const x = (View.cssW - w) / 2;
-  const y = (View.cssH - h) / 2;
+  const y = View.cssH - h - 18;            // bottom-anchored
   panel(ctx, x, y, w, h);
 
   ctx.save();
   ctx.textAlign = 'center';
   ctx.fillStyle = COL.terracottaDeep;
   ctx.font = '600 12px "Helvetica Neue", Arial, sans-serif';
-  ctx.fillText('S I T E   H A L T E D', View.cssW / 2, y + 34);
+  ctx.fillText('S T A B I L I T Y   T O O   L O W', View.cssW / 2, y + 30);
   ctx.fillStyle = COL.ink;
-  ctx.font = '900 30px Georgia, serif';
-  ctx.fillText('Off the slab!', View.cssW / 2, y + 64);
+  ctx.font = '900 26px Georgia, serif';
+  ctx.fillText('Keep it steady', View.cssW / 2, y + 56);
 
-  ctx.font = '500 15px "Helvetica Neue", Arial, sans-serif';
-  ctx.fillStyle = COL.inkSoft;
-  ctx.fillText('Floors completed', View.cssW / 2, y + 108);
+  // Score.
+  ctx.fillStyle = 'rgba(31,42,46,0.55)';
+  ctx.font = '600 12px "Helvetica Neue", Arial, sans-serif';
+  ctx.fillText('S C O R E', View.cssW / 2, y + 84);
   ctx.fillStyle = COL.terracotta;
-  ctx.font = '900 46px Georgia, serif';
-  ctx.fillText(`${Game.score} / ${CFG.TOTAL_FLOORS}`, View.cssW / 2, y + 150);
+  ctx.font = '900 44px Georgia, serif';
+  ctx.fillText(`${Game.score}`, View.cssW / 2, y + 128);
+  ctx.fillStyle = COL.inkSoft;
+  ctx.font = '500 13px "Helvetica Neue", Arial, sans-serif';
+  ctx.fillText(`floors of ${CFG.TOTAL_FLOORS}` +
+    (Game.bestCombo >= 2 ? `   ·   best streak x${Game.bestCombo}` : ''),
+    View.cssW / 2, y + 150);
   ctx.restore();
 
-  Buttons.retry = { x: View.cssW / 2 - 90, y: y + h - 64, w: 180, h: 48 };
+  // Final stability reading.
+  drawStabilityBar(ctx, View.cssW / 2 - 75, y + 178, 150, 12,
+                   Game.stabShown / CFG.STAB_MAX, false);
+
+  Buttons.retry = { x: View.cssW / 2 - 90, y: y + h - 58, w: 180, h: 48 };
   drawButton(ctx, Buttons.retry, 'TRY AGAIN', true);
 }
 
 function drawWinOverlay(ctx) {
-  // Keep the revealed tower visible behind a soft scrim.
-  ctx.fillStyle = 'rgba(20,28,31,0.40)';
+  // Soft scrim — keep the whole revealed tower visible above the card.
+  ctx.fillStyle = 'rgba(20,28,31,0.22)';
   ctx.fillRect(0, 0, View.cssW, View.cssH);
 
   // Confetti continues over the overlay.
   drawConfetti(ctx);
 
   const w = Math.min(380, View.cssW - 32);
-  const h = 360;
+  const h = 336;
   const x = (View.cssW - w) / 2;
-  const y = (View.cssH - h) / 2;
+  const y = View.cssH - h - 16;            // bottom-anchored
   panel(ctx, x, y, w, h);
 
   ctx.save();
   ctx.textAlign = 'center';
   ctx.fillStyle = 'rgba(31,42,46,0.55)';
   ctx.font = '600 12px "Helvetica Neue", Arial, sans-serif';
-  ctx.fillText('T O P P E D   O U T', View.cssW / 2, y + 34);
+  ctx.fillText('T O P P E D   O U T', View.cssW / 2, y + 28);
 
   ctx.fillStyle = COL.ink;
-  ctx.font = '800 26px Georgia, serif';
-  ctx.fillText('Congratulations', View.cssW / 2, y + 58);
+  ctx.font = '800 24px Georgia, serif';
+  ctx.fillText('Congratulations', View.cssW / 2, y + 52);
 
   // Wordmark image with styled text fallback.
-  const wmY = y + 96;
+  const wmY = y + 66;
   if (Assets.wordmark && Assets.wordmark.loaded) {
     const iw = Assets.wordmark.width, ih = Assets.wordmark.height;
-    const maxW = w - 80;
-    const dw = Math.min(maxW, iw);
+    const dw = Math.min(w - 90, iw);
     const dh = dw * (ih / iw);
     ctx.drawImage(Assets.wordmark, View.cssW / 2 - dw / 2, wmY, dw, dh);
   } else {
     ctx.fillStyle = COL.terracotta;
-    ctx.font = '900 60px Georgia, serif';
-    ctx.fillText('PAGE 22', View.cssW / 2, wmY + 56);
+    ctx.font = '900 52px Georgia, serif';
+    ctx.fillText('PAGE 22', View.cssW / 2, wmY + 50);
     ctx.fillStyle = 'rgba(31,42,46,0.6)';
-    ctx.font = '600 13px "Helvetica Neue", Arial, sans-serif';
-    ctx.fillText('B Y   R E N E E V', View.cssW / 2, wmY + 92);
+    ctx.font = '600 12px "Helvetica Neue", Arial, sans-serif';
+    ctx.fillText('B Y   R E N E E V', View.cssW / 2, wmY + 80);
   }
 
   ctx.fillStyle = COL.inkSoft;
-  ctx.font = '500 15px "Helvetica Neue", Arial, sans-serif';
+  ctx.font = '500 14px "Helvetica Neue", Arial, sans-serif';
   ctx.fillText('All 22 floors stacked. The landmark is complete.',
-    View.cssW / 2, y + 232);
+    View.cssW / 2, y + 196);
   ctx.restore();
 
-  Buttons.enquire = { x: View.cssW / 2 - 150, y: y + 264, w: 144, h: 50 };
-  Buttons.again = { x: View.cssW / 2 + 6, y: y + 264, w: 144, h: 50 };
+  // Final stability reading.
+  drawStabilityBar(ctx, View.cssW / 2 - 75, y + 216, 150, 12,
+                   Game.stabShown / CFG.STAB_MAX, false);
+
+  Buttons.enquire = { x: View.cssW / 2 - 150, y: y + h - 58, w: 144, h: 50 };
+  Buttons.again = { x: View.cssW / 2 + 6, y: y + h - 58, w: 144, h: 50 };
   drawButton(ctx, Buttons.enquire, 'ENQUIRE', true);
   drawButton(ctx, Buttons.again, 'PLAY AGAIN', false);
 }
@@ -1105,11 +1189,20 @@ function render() {
     ctx.translate(-View.cssW / 2, -View.cssH * 0.62);
   }
 
+  // The BUILDING wobbles as it gets unstable (crane is excluded).
+  const wob = wobbleAngle();
+  ctx.save();
+  if (wob !== 0) {
+    const px = wx(0), py = wy(CFG.GROUND_Y);
+    ctx.translate(px, py); ctx.rotate(wob); ctx.translate(-px, -py);
+  }
   drawBase(ctx);
   for (const b of Game.blocks) drawBlock(ctx, b);
   drawOffcuts(ctx);
   drawCrown(ctx);
   if (Game.state === STATE.PLAYING || Game.state === STATE.DROPPING) drawMoving(ctx);
+  ctx.restore();           // end wobble
+
   drawCrane(ctx);
   drawFlashes(ctx);
   if (Game.state === STATE.WIN_SEQ) drawConfetti(ctx);
@@ -1136,18 +1229,18 @@ function handlePrimaryAction(px, py) {
   // px/py in CSS px (null when from keyboard).
   switch (Game.state) {
     case STATE.START:
-      if (px == null || pointInRect(px, py, Buttons.build)) startGame();
+      if (px == null || pointInRect(px, py, Buttons.build)) { AudioFX.click(); startGame(); }
       break;
     case STATE.PLAYING:
       dropFloor();
       break;
     case STATE.LOSE:
-      if (px == null || pointInRect(px, py, Buttons.retry)) startGame();
+      if (px == null || pointInRect(px, py, Buttons.retry)) { AudioFX.click(); startGame(); }
       break;
     case STATE.WIN_OVERLAY:
-      if (px != null && pointInRect(px, py, Buttons.again)) startGame();
-      else if (px != null && pointInRect(px, py, Buttons.enquire)) { /* no-op CTA */ }
-      else if (px == null) startGame();
+      if (px != null && pointInRect(px, py, Buttons.again)) { AudioFX.click(); startGame(); }
+      else if (px != null && pointInRect(px, py, Buttons.enquire)) { AudioFX.click(); /* no-op CTA */ }
+      else if (px == null) { AudioFX.click(); startGame(); }
       break;
     default:
       // DROPPING / SETTLE / WIN_SEQ ignore input.
@@ -1155,11 +1248,84 @@ function handlePrimaryAction(px, py) {
   }
 }
 
+/* ============================================================================
+   AUDIO  (WebAudio synth — SFX + party music, no external files)
+   ========================================================================== */
+const AudioFX = {
+  ctx: null, master: null, musicOn: false, _timer: null,
+
+  ensure() {
+    if (this.ctx) { if (this.ctx.state === 'suspended') this.ctx.resume(); return; }
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    this.ctx = new AC();
+    this.master = this.ctx.createGain();
+    this.master.gain.value = 0.5;
+    this.master.connect(this.ctx.destination);
+  },
+
+  tone(freq, dur, type = 'sine', vol = 0.3, slideTo = null) {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    const o = this.ctx.createOscillator(), g = this.ctx.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(freq, t);
+    if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t + dur);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol, t + 0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g); g.connect(this.master);
+    o.start(t); o.stop(t + dur + 0.03);
+  },
+
+  thunk() {
+    if (!this.ctx) return;
+    const t = this.ctx.currentTime;
+    const n = Math.floor(this.ctx.sampleRate * 0.08);
+    const b = this.ctx.createBuffer(1, n, this.ctx.sampleRate);
+    const d = b.getChannelData(0);
+    for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / n, 2);
+    const s = this.ctx.createBufferSource(); s.buffer = b;
+    const g = this.ctx.createGain(); g.gain.value = 0.12;
+    s.connect(g); g.connect(this.master); s.start(t);
+  },
+
+  click()   { this.ensure(); this.tone(520, 0.08, 'triangle', 0.25, 720); },
+  place()   { this.ensure(); this.tone(190, 0.12, 'sine', 0.35, 120); this.thunk(); },
+  perfect() { this.ensure(); this.tone(660, 0.10, 'triangle', 0.28, 880);
+              this.tone(990, 0.12, 'sine', 0.20); },
+  lose()    { this.ensure(); this.stopParty(); this.tone(320, 0.5, 'sawtooth', 0.3, 70); },
+
+  startParty() {
+    this.ensure();
+    if (!this.ctx || this.musicOn) return;
+    this.musicOn = true;
+    const beat = 60 / 132;
+    const mel = [523.25, 659.25, 783.99, 1046.5, 783.99, 659.25,
+                 587.33, 698.46, 880.0, 1174.7, 880.0, 698.46];
+    let i = 0;
+    const step = () => {
+      if (!this.musicOn || !this.ctx) return;
+      const f = mel[i % mel.length];
+      this.tone(f, beat * 0.9, 'triangle', 0.22);
+      if (i % 2 === 0) this.tone(f / 2, beat * 1.1, 'sine', 0.18);
+      i++;
+      this._timer = setTimeout(step, beat * 500);
+    };
+    step();
+  },
+  stopParty() {
+    this.musicOn = false;
+    if (this._timer) { clearTimeout(this._timer); this._timer = null; }
+  },
+};
+
 function bindInput() {
   const cv = View.canvas;
 
   cv.addEventListener('pointerdown', (e) => {
     e.preventDefault();
+    AudioFX.ensure();
     const rect = cv.getBoundingClientRect();
     handlePrimaryAction(e.clientX - rect.left, e.clientY - rect.top);
   }, { passive: false });
@@ -1167,6 +1333,7 @@ function bindInput() {
   window.addEventListener('keydown', (e) => {
     if (e.code === 'Space' || e.key === ' ') {
       e.preventDefault();
+      AudioFX.ensure();
       handlePrimaryAction(null, null);
     } else if (e.code === 'Enter' &&
                (Game.state === STATE.START || Game.state === STATE.LOSE ||
