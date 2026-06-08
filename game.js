@@ -585,17 +585,20 @@ function updateCamera(dt) {
                      Game.state === STATE.WIN_OVERLAY || Game.state === STATE.LOSE;
 
   if (revealFull) {
-    // Pull back so the ENTIRE tower is on screen (base -> all floors -> crown),
-    // framed in the upper area with room for the end-screen card below.
+    // Frame the WHOLE tower in the space above the end-screen card: base sits
+    // just above the card, crown near the top margin. No empty sky "abyss".
     const isWin = Game.state !== STATE.LOSE;
     const crownH = isWin ? CFG.FLOOR_DRAW_W * 1.18 * (368 / 700) : 0;
     const towerTop = towerTopY() - crownH;          // top of structure (world y, negative)
-    const towerBot = CFG.GROUND_Y;                  // base bottom
-    const towerH = Math.max(1, towerBot - towerTop);
-    const avail = View.cssH * 0.52;                 // vertical room for the tower
-    targetScale = Math.min(View.scale, avail / towerH);
-    targetCam = (towerTop + towerBot) / 2;          // tower mid-point
-    targetAnchor = View.cssH * 0.36;                // centre tower in the upper area
+    const towerH = Math.max(1, CFG.GROUND_Y - towerTop);
+    const cardH = isWin ? 336 : 286;
+    const cardTopY = View.cssH - cardH - 18;
+    const topMargin = View.cssH * 0.09;             // headroom above the crown
+    const baseY = cardTopY - View.cssH * 0.015;     // building base rests just above the card
+    const span = Math.max(40, baseY - topMargin);   // vertical room for the tower
+    targetScale = Math.min(View.scale * 1.25, span / towerH);
+    targetCam = CFG.GROUND_Y;                        // ground (base) is the anchor point
+    targetAnchor = baseY;                            // ...mapped to just above the card
   } else {
     // Follow the active build region: keep crane + tower top in frame.
     targetCam = towerTopY() - CFG.CRANE_CLEARANCE * 0.55;
@@ -713,9 +716,9 @@ function initBackground() {
   // Clouds: 3 depth layers, slow -> fast, far/faint -> near/brighter.
   const clouds = [];
   const layerCfg = [
-    { speed: 7,  scale: 0.85, alpha: 0.30, n: 3 },   // far, faint, high
-    { speed: 13, scale: 1.15, alpha: 0.42, n: 3 },   // mid
-    { speed: 22, scale: 1.55, alpha: 0.52, n: 2 },   // near, bigger
+    { speed: 7,  scale: 1.05, alpha: 0.55, n: 3 },   // far, high
+    { speed: 13, scale: 1.45, alpha: 0.72, n: 3 },   // mid
+    { speed: 20, scale: 2.00, alpha: 0.88, n: 2 },   // near, big & bright
   ];
   for (let L = 0; L < layerCfg.length; L++) {
     const c = layerCfg[L];
@@ -976,19 +979,20 @@ function drawClouds(ctx, prog) {
 function drawCloud(ctx, x, y, scale, alpha) {
   ctx.save();
   ctx.globalAlpha = alpha;
-  const u = 26 * scale;                        // unit puff radius
-  // Soft, realistic white cloud: overlapping radial-gradient puffs with feathered
-  // edges and a faint cooler underside.
+  const u = 24 * scale;                        // unit puff radius
+  // A fuller cumulus: a flat-ish base row of puffs with a lumpy, brighter top.
   const puffs = [
-    [0.0,  0.10, 1.00], [1.2, -0.30, 0.86], [2.3, 0.05, 0.96],
-    [1.1,  0.42, 1.08], [-1.0, 0.26, 0.72], [0.4, -0.18, 0.90],
+    [-2.1, 0.40, 0.95], [-0.8, 0.50, 1.20], [0.6, 0.52, 1.30], [2.0, 0.42, 1.00], // base
+    [-1.3, -0.18, 1.05], [0.1, -0.45, 1.25], [1.4, -0.12, 1.00],                    // top lumps
+    [-0.2, -0.85, 0.72],                                                            // crown
   ];
   for (const [dx, dy, r] of puffs) {
     const cx = x + dx * u, cy = y + dy * u, rad = u * r;
-    const g = ctx.createRadialGradient(cx, cy - rad * 0.2, rad * 0.15, cx, cy, rad);
-    g.addColorStop(0,   'rgba(255,255,255,0.97)');
-    g.addColorStop(0.6, 'rgba(247,251,255,0.78)');
-    g.addColorStop(1,   'rgba(232,241,250,0)');
+    const top = dy < -0.1;
+    const g = ctx.createRadialGradient(cx, cy - rad * 0.3, rad * 0.12, cx, cy, rad);
+    g.addColorStop(0,   top ? 'rgba(255,255,255,0.99)' : 'rgba(244,248,253,0.96)');
+    g.addColorStop(0.55, 'rgba(247,251,255,0.85)');
+    g.addColorStop(1,   'rgba(225,234,244,0)');
     ctx.fillStyle = g;
     ctx.beginPath(); ctx.arc(cx, cy, rad, 0, Math.PI * 2); ctx.fill();
   }
@@ -1093,7 +1097,7 @@ function drawMoving(ctx) {
 // The named feature: a tower crane (mast, jib, counter-jib, counterweight,
 // trolley, cable, hook). Drawn in screen space from world anchors.
 function drawCrane(ctx) {
-  if (Game.state === STATE.WIN_OVERLAY) return;
+  if (Game.state === STATE.WIN_OVERLAY || Game.state === STATE.LOSE) return;
   let awayShift = 0, awayAlpha = 1;
   if (Game.state === STATE.WIN_SEQ) {
     awayShift = Game._craneAway * 520;     // slides up & right out of frame
@@ -1290,7 +1294,8 @@ function drawConfetti(ctx) {
 // -------- HUD + overlays (screen space) --------------------------------------
 
 function drawHUD(ctx) {
-  if (Game.state === STATE.START || Game.state === STATE.WIN_OVERLAY) return;
+  if (Game.state === STATE.START || Game.state === STATE.WIN_OVERLAY ||
+      Game.state === STATE.LOSE) return;
 
   const pad = 18;
   ctx.save();
