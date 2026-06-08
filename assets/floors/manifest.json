@@ -1,0 +1,150 @@
+{
+  "source": "page22_alpha.png",
+  "canonical_floor": {
+    "w": 602
+  },
+  "floors": [
+    {
+      "n": 1,
+      "file": "floor_01.png",
+      "w": 602,
+      "h": 93
+    },
+    {
+      "n": 2,
+      "file": "floor_02.png",
+      "w": 602,
+      "h": 93
+    },
+    {
+      "n": 3,
+      "file": "floor_03.png",
+      "w": 602,
+      "h": 93
+    },
+    {
+      "n": 4,
+      "file": "floor_04.png",
+      "w": 602,
+      "h": 93
+    },
+    {
+      "n": 5,
+      "file": "floor_05.png",
+      "w": 602,
+      "h": 93
+    },
+    {
+      "n": 6,
+      "file": "floor_06.png",
+      "w": 602,
+      "h": 93
+    },
+    {
+      "n": 7,
+      "file": "floor_07.png",
+      "w": 602,
+      "h": 93
+    },
+    {
+      "n": 8,
+      "file": "floor_08.png",
+      "w": 602,
+      "h": 93
+    },
+    {
+      "n": 9,
+      "file": "floor_09.png",
+      "w": 602,
+      "h": 93
+    },
+    {
+      "n": 10,
+      "file": "floor_10.png",
+      "w": 602,
+      "h": 93
+    },
+    {
+      "n": 11,
+      "file": "floor_11.png",
+      "w": 602,
+      "h": 93
+    },
+    {
+      "n": 12,
+      "file": "floor_12.png",
+      "w": 602,
+      "h": 93
+    },
+    {
+      "n": 13,
+      "file": "floor_13.png",
+      "w": 602,
+      "h": 93
+    },
+    {
+      "n": 14,
+      "file": "floor_14.png",
+      "w": 602,
+      "h": 93
+    },
+    {
+      "n": 15,
+      "file": "floor_15.png",
+      "w": 602,
+      "h": 93
+    },
+    {
+      "n": 16,
+      "file": "floor_16.png",
+      "w": 602,
+      "h": 93
+    },
+    {
+      "n": 17,
+      "file": "floor_17.png",
+      "w": 602,
+      "h": 93
+    },
+    {
+      "n": 18,
+      "file": "floor_18.png",
+      "w": 602,
+      "h": 93
+    },
+    {
+      "n": 19,
+      "file": "floor_19.png",
+      "w": 602,
+      "h": 93
+    },
+    {
+      "n": 20,
+      "file": "floor_20.png",
+      "w": 602,
+      "h": 93
+    },
+    {
+      "n": 21,
+      "file": "floor_21.png",
+      "w": 602,
+      "h": 93
+    },
+    {
+      "n": 22,
+      "file": "floor_22.png",
+      "w": 602,
+      "h": 93
+    }
+  ],
+  "crown": {
+    "file": "crown.png",
+    "w": 700,
+    "h": 368
+  },
+  "base": {
+    "file": "base.png",
+    "w": 1085,
+    "h": 166
+  }
+}

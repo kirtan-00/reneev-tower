@@ -1,0 +1,49 @@
+/* ============================================================
+   PAGE 22 — Stack Builder
+   Editorial real-estate palette: warm taupe / terracotta / petrol ink.
+   All gameplay UI is drawn on canvas; this file owns layout + chrome.
+   ============================================================ */
+
+:root {
+  --ink:        #1f2a2e;   /* deep petrol ink */
+  --ink-soft:   #34474d;
+  --paper:      #f3ead9;   /* warm paper */
+  --beige:      #e7d9bf;
+  --taupe:      #b9a888;
+  --terracotta: #c0714e;
+  --terracotta-deep: #9c5536;
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #11181b;
+  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  color: var(--ink);
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+}
+
+/* Stage centers the portrait canvas and lets it fill the viewport. */
+#stage {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background:
+    radial-gradient(120% 90% at 50% 0%, #2a3a40 0%, #161f22 60%, #0e1416 100%);
+}
+
+#game {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  cursor: pointer;
+}
