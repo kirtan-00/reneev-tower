@@ -49,7 +49,7 @@ const CFG = {
   CRANE_CLEARANCE: 230,   // how far the jib sits above the current tower top
   CABLE_LEN: 120,         // pendulum cable length L
   JIB_LEN: 360,           // length of working jib (to the right of mast)
-  COUNTERJIB_LEN: 150,
+  COUNTERJIB_LEN: 74,
 
   // Pendulum tuning (difficulty ramps with floor number).
   SWING_AMP_MIN: 0.30,    // radians at floor 1 (wider, harder)
@@ -211,9 +211,9 @@ function resizeCanvas() {
   // All drawing happens in CSS px; dpr handled by the base transform.
   View.ctx.setTransform(View.dpr, 0, 0, View.dpr, 0, 0);
 
-  // Fit world column width into the viewport width (with side margins),
-  // but never scale so tall that vertical play feels cramped.
-  const targetW = Math.min(View.cssW, View.cssH * 0.62); // keep portrait-ish
+  // Fit world column with SIDE MARGINS so the crane (which stands beside the
+  // tower) and the building both stay fully on-screen, never cropped.
+  const targetW = Math.min(View.cssW * 0.86, View.cssH * 0.58);
   View.scale = targetW / CFG.WORLD_W;
   if (Game.state === STATE.START || Game.state === STATE.PLAYING ||
       Game.state === STATE.DROPPING || Game.state === STATE.SETTLE) {
@@ -1118,29 +1118,33 @@ function drawCrane(ctx) {
   const half = Math.max(5, wlen(13));               // half-width of the lattice chords
   const lw = (v) => Math.max(1, wlen(v));
   const bottomOfView = View.cssH + 40;
+  // The mast rises from its foundation at GROUND_Y up to the jib. It stops at the
+  // ground (never runs past it); when the build is tall the base is off-screen.
+  const groundY = wy(CFG.GROUND_Y);
+  const mastBottom = Math.min(bottomOfView, groundY);
 
-  // ---- Tower mast: two chords rising from below, rungs + X-bracing ----------
+  // ---- Tower mast: two chords from the foundation up to the jib -------------
   ctx.lineCap = 'round';
   ctx.strokeStyle = STEEL;
   ctx.lineWidth = lw(5.5);
   ctx.beginPath();
-  ctx.moveTo(mastX - half, jibScreenY); ctx.lineTo(mastX - half, bottomOfView);
-  ctx.moveTo(mastX + half, jibScreenY); ctx.lineTo(mastX + half, bottomOfView);
+  ctx.moveTo(mastX - half, jibScreenY); ctx.lineTo(mastX - half, mastBottom);
+  ctx.moveTo(mastX + half, jibScreenY); ctx.lineTo(mastX + half, mastBottom);
   ctx.stroke();
   ctx.lineWidth = lw(2.2);
   const step = Math.max(14, wlen(34));
   let zig = true;
-  for (let yy = jibScreenY; yy < bottomOfView; yy += step) {
+  for (let yy = jibScreenY; yy < mastBottom; yy += step) {
+    const ye = Math.min(yy + step, mastBottom);
     ctx.beginPath();                                // horizontal rung
     ctx.moveTo(mastX - half, yy); ctx.lineTo(mastX + half, yy); ctx.stroke();
     ctx.beginPath();                                // alternating diagonal
-    if (zig) { ctx.moveTo(mastX - half, yy); ctx.lineTo(mastX + half, yy + step); }
-    else     { ctx.moveTo(mastX + half, yy); ctx.lineTo(mastX - half, yy + step); }
+    if (zig) { ctx.moveTo(mastX - half, yy); ctx.lineTo(mastX + half, ye); }
+    else     { ctx.moveTo(mastX + half, yy); ctx.lineTo(mastX - half, ye); }
     ctx.stroke(); zig = !zig;
   }
 
   // ---- Concrete foundation where the mast is mounted (visible near ground) --
-  const groundY = wy(CFG.GROUND_Y);
   if (groundY < bottomOfView + 40 && groundY > -120) {
     const padW = half * 5.2, padH = Math.max(12, wlen(40));
     ctx.fillStyle = '#4f5961';                         // concrete block
