@@ -576,10 +576,28 @@ function spawnOffcuts(m, ref, overlapLeft, overlapRight, placedTopY) {
   }
 }
 
+// Final result payload for the end card (win or lose).
+function makeResult(won) {
+  const pts = Game.points;
+  const stab = Game.stability;
+  return {
+    won,
+    points: pts,
+    stability: stab,
+    final: P22Logic.finalScore(pts, stab),
+    grade: P22Logic.grade(won, stab),
+    message: won ? P22Logic.winMessage(stab) : P22Logic.loseMessage(Game.blocks.length),
+    t: 0,
+    stamped: false,
+  };
+}
+
 function triggerLose() {
   if (Game.state === STATE.LOSE) return;
   Game.state = STATE.LOSE;
   Game.moving = null;
+  Game.result = makeResult(false);
+  Game.finalScore = Game.result.final;
   AudioFX.lose();
 }
 
@@ -616,7 +634,12 @@ function stepWinSequence(dt) {
     if (p >= 1) { Game.seqStage = 2; Game.seqT = 0; spawnConfetti(); AudioFX.startParty(); }
   } else if (Game.seqStage === 2) {
     // Camera pulls back to reveal full tower (handled in updateCamera).
-    if (Game.seqT >= 1.2) { Game.seqStage = 3; Game.seqT = 0; Game.state = STATE.WIN_OVERLAY; }
+    if (Game.seqT >= 1.2) {
+      Game.seqStage = 3; Game.seqT = 0;
+      Game.result = makeResult(true);
+      Game.finalScore = Game.result.final;
+      Game.state = STATE.WIN_OVERLAY;
+    }
   }
 }
 
@@ -654,7 +677,7 @@ function updateCamera(dt) {
     const crownH = isWin ? CFG.FLOOR_DRAW_W * 1.18 * (368 / 700) : 0;
     const towerTop = towerTopY() - crownH;          // top of structure (world y, negative)
     const towerH = Math.max(1, CFG.GROUND_Y - towerTop);
-    const cardH = isWin ? 336 : 286;
+    const cardH = 360;                              // unified result card
     const cardTopY = View.cssH - cardH - 18;
     const topMargin = View.cssH * 0.09;             // headroom above the crown
     const baseY = cardTopY - View.cssH * 0.015;     // building base rests just above the card
@@ -714,6 +737,9 @@ function updateFx(dt) {
 
   // Global pulse decay.
   Game.pulse = Math.max(0, Game.pulse - dt * 3.2);
+
+  // End-card entrance/count-up timeline.
+  if (Game.result) Game.result.t += dt;
 
   // Landing feel timers.
   if (Game.landFx) Game.landFx.t += dt;
@@ -1666,10 +1692,18 @@ function drawStabilityBar(ctx, x, y, w, h, frac, hud) {
 }
 
 // Buttons live as screen-space rects we hit-test in the input handler.
-const Buttons = { build: null, again: null, retry: null, enquire: null };
+// `pressed` = {rect, t} for a brief tap-down visual on the last hit button.
+const Buttons = { build: null, again: null, project: null, pressed: null };
 
-function drawButton(ctx, rect, label, primary) {
+function drawButton(ctx, rect, label, primary, fontPx) {
   ctx.save();
+  // Pressed feedback: scale 0.96 about centre + slight darken for 150ms.
+  const pr = Buttons.pressed;
+  if (pr && pr.rect === rect && Game.fxTime - pr.t < 0.15) {
+    const bx = rect.x + rect.w / 2, by = rect.y + rect.h / 2;
+    ctx.translate(bx, by); ctx.scale(0.96, 0.96); ctx.translate(-bx, -by);
+    ctx.globalAlpha = 0.85;
+  }
   if (primary) {
     ctx.fillStyle = COL.terracotta;
   } else {
@@ -1684,7 +1718,7 @@ function drawButton(ctx, rect, label, primary) {
     ctx.stroke();
   }
   ctx.fillStyle = primary ? COL.paper : COL.ink;
-  ctx.font = '800 17px "Helvetica Neue", Arial, sans-serif';
+  ctx.font = '800 ' + (fontPx || 17) + 'px "Helvetica Neue", Arial, sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(label, rect.x + rect.w / 2, rect.y + rect.h / 2 + 1);
@@ -1738,101 +1772,173 @@ function drawStartScreen(ctx) {
   drawButton(ctx, Buttons.build, 'BUILD', true);
 }
 
-function drawLoseScreen(ctx) {
-  // Light scrim so the collapsed tower stays visible above the card.
-  ctx.fillStyle = 'rgba(20,28,31,0.30)';
-  ctx.fillRect(0, 0, View.cssW, View.cssH);
-  const w = Math.min(340, View.cssW - 40);
-  const h = 286;
-  const x = (View.cssW - w) / 2;
-  const y = View.cssH - h - 18;            // bottom-anchored
-  panel(ctx, x, y, w, h);
+/* ----------------------------------------------------------------------------
+   END RESULT CARD (win + lose) — animated finished-game UI.
+   Timeline (r.t): 0-0.28s card slides up/fades in; 0.3-1.2s score count-up;
+   0.5-1.3s stability dial sweep; 1.2s grade stamp slams in; buttons from 0.5s.
+   ---------------------------------------------------------------------------- */
 
-  ctx.save();
-  ctx.textAlign = 'center';
-  ctx.fillStyle = COL.terracottaDeep;
-  ctx.font = '600 12px "Helvetica Neue", Arial, sans-serif';
-  ctx.fillText('S T A B I L I T Y   T O O   L O W', View.cssW / 2, y + 30);
-  ctx.fillStyle = COL.ink;
-  ctx.font = '900 26px Georgia, serif';
-  ctx.fillText('Keep it steady', View.cssW / 2, y + 56);
+function easeOutCubic(p) { return 1 - Math.pow(1 - Math.max(0, Math.min(1, p)), 3); }
 
-  // Score.
-  ctx.fillStyle = 'rgba(31,42,46,0.55)';
-  ctx.font = '600 12px "Helvetica Neue", Arial, sans-serif';
-  ctx.fillText('S C O R E', View.cssW / 2, y + 84);
-  ctx.fillStyle = COL.terracotta;
-  ctx.font = '900 44px Georgia, serif';
-  ctx.fillText(`${Game.score}`, View.cssW / 2, y + 128);
-  ctx.fillStyle = COL.inkSoft;
-  ctx.font = '500 13px "Helvetica Neue", Arial, sans-serif';
-  ctx.fillText(`floors of ${CFG.TOTAL_FLOORS}` +
-    (Game.bestCombo >= 2 ? `   ·   best streak x${Game.bestCombo}` : ''),
-    View.cssW / 2, y + 150);
-  ctx.restore();
-
-  // Final stability reading.
-  drawStabilityBar(ctx, View.cssW / 2 - 75, y + 178, 150, 12,
-                   Game.stabShown / CFG.STAB_MAX, false);
-
-  Buttons.retry = { x: View.cssW / 2 - 90, y: y + h - 58, w: 180, h: 48 };
-  drawButton(ctx, Buttons.retry, 'TRY AGAIN', true);
+function openProject() {
+  const w = window.open(CFG.PROJECT_URL, '_blank', 'noopener');
+  if (!w) location.href = CFG.PROJECT_URL;
 }
 
-function drawWinOverlay(ctx) {
-  // Soft scrim — keep the whole revealed tower visible above the card.
-  ctx.fillStyle = 'rgba(20,28,31,0.22)';
-  ctx.fillRect(0, 0, View.cssW, View.cssH);
+// Split a message onto up to two centred lines that fit the card.
+function wrapTwoLines(ctx, text, maxW) {
+  if (ctx.measureText(text).width <= maxW) return [text];
+  const words = text.split(' ');
+  let best = 1;
+  for (let i = 1; i < words.length; i++) {
+    if (ctx.measureText(words.slice(0, i).join(' ')).width <= maxW) best = i;
+  }
+  return [words.slice(0, best).join(' '), words.slice(best).join(' ')];
+}
 
-  // Confetti continues over the overlay.
-  drawConfetti(ctx);
+function drawResultCard(ctx) {
+  const r = Game.result;
+  if (!r) return;
+
+  // Scrim — keep the revealed tower visible above the card.
+  ctx.fillStyle = r.won ? 'rgba(20,28,31,0.22)' : 'rgba(20,28,31,0.30)';
+  ctx.fillRect(0, 0, View.cssW, View.cssH);
+  if (r.won) drawConfetti(ctx);
 
   const w = Math.min(380, View.cssW - 32);
-  const h = 336;
+  const h = 360;
   const x = (View.cssW - w) / 2;
-  const y = View.cssH - h - 16;            // bottom-anchored
-  panel(ctx, x, y, w, h);
+  const slide = easeOutCubic(r.t / 0.28);
+  const y = (View.cssH - h - 16) + (1 - slide) * 60;
+  const cx = View.cssW / 2;
 
   ctx.save();
+  ctx.globalAlpha = slide;
+  panel(ctx, x, y, w, h);
   ctx.textAlign = 'center';
-  ctx.fillStyle = 'rgba(31,42,46,0.55)';
+
+  // Kicker.
+  ctx.fillStyle = r.won ? 'rgba(31,42,46,0.55)' : COL.terracottaDeep;
   ctx.font = '600 12px "Helvetica Neue", Arial, sans-serif';
-  ctx.fillText('T O P P E D   O U T', View.cssW / 2, y + 28);
+  ctx.fillText(r.won ? 'T O P P E D   O U T' : 'S T A B I L I T Y   T O O   L O W',
+               cx, y + 28);
 
-  ctx.fillStyle = COL.ink;
-  ctx.font = '800 24px Georgia, serif';
-  ctx.fillText('Congratulations', View.cssW / 2, y + 52);
-
-  // Wordmark image with styled text fallback.
-  const wmY = y + 66;
-  if (Assets.wordmark && Assets.wordmark.loaded) {
-    const iw = Assets.wordmark.width, ih = Assets.wordmark.height;
-    const dw = Math.min(w - 90, iw);
-    const dh = dw * (ih / iw);
-    ctx.drawImage(Assets.wordmark, View.cssW / 2 - dw / 2, wmY, dw, dh);
-  } else {
-    ctx.fillStyle = COL.terracotta;
-    ctx.font = '900 52px Georgia, serif';
-    ctx.fillText('PAGE 22', View.cssW / 2, wmY + 50);
-    ctx.fillStyle = 'rgba(31,42,46,0.6)';
-    ctx.font = '600 12px "Helvetica Neue", Arial, sans-serif';
-    ctx.fillText('B Y   R E N E E V', View.cssW / 2, wmY + 80);
+  // Brand line (win) — wordmark image if available, else serif text.
+  if (r.won) {
+    if (Assets.wordmark && Assets.wordmark.loaded) {
+      const iw = Assets.wordmark.width, ih = Assets.wordmark.height;
+      const dw = Math.min(w - 150, iw);
+      const dh = dw * (ih / iw);
+      ctx.drawImage(Assets.wordmark, cx - dw / 2, y + 38, dw, dh);
+    } else {
+      ctx.fillStyle = COL.terracotta;
+      ctx.font = '900 26px Georgia, serif';
+      ctx.fillText('PAGE 22', cx, y + 60);
+    }
   }
 
+  // Tier message (up to two lines).
   ctx.fillStyle = COL.inkSoft;
   ctx.font = '500 14px "Helvetica Neue", Arial, sans-serif';
-  ctx.fillText('All 22 floors stacked. The landmark is complete.',
-    View.cssW / 2, y + 196);
+  const lines = wrapTwoLines(ctx, r.message, w - 56);
+  const msgY = r.won ? y + 86 : y + 58;
+  for (let i = 0; i < lines.length; i++) {
+    ctx.fillText(lines[i], cx, msgY + i * 19);
+  }
+
+  // Final score count-up + the math behind it.
+  ctx.fillStyle = 'rgba(31,42,46,0.55)';
+  ctx.font = '600 11px "Helvetica Neue", Arial, sans-serif';
+  ctx.fillText('F I N A L   S C O R E', cx, y + 138);
+  const shown = Math.round(r.final * easeOutCubic((r.t - 0.3) / 0.9));
+  ctx.fillStyle = COL.terracotta;
+  ctx.font = '900 44px Georgia, serif';
+  ctx.fillText(shown.toLocaleString('en-IN'), cx, y + 180);
+  ctx.fillStyle = 'rgba(31,42,46,0.55)';
+  ctx.font = '600 12px "Helvetica Neue", Arial, sans-serif';
+  ctx.fillText(`${r.points.toLocaleString('en-IN')} pts × ${(r.stability / 100).toFixed(2)} stability`,
+               cx, y + 202);
+
+  // Stability dial (left) + grade stamp (right).
+  drawStabilityDial(ctx, cx - 62, y + 252, 40, r);
+  drawGradeStamp(ctx, cx + 72, y + 248, r);
+
   ctx.restore();
 
-  // Final stability reading.
-  drawStabilityBar(ctx, View.cssW / 2 - 75, y + 216, 150, 12,
-                   Game.stabShown / CFG.STAB_MAX, false);
+  // Buttons (shared by win + lose): project CTA + replay.
+  if (r.t > 0.5) {
+    Buttons.project = { x: cx - 152, y: y + h - 60, w: 182, h: 48 };
+    Buttons.again = { x: cx + 38, y: y + h - 60, w: 114, h: 48 };
+    drawButton(ctx, Buttons.project, 'CHECK OUT PAGE 22', true, 13);
+    drawButton(ctx, Buttons.again, r.won ? 'PLAY AGAIN' : 'TRY AGAIN', false, 13);
+  } else {
+    Buttons.project = null;
+    Buttons.again = null;
+  }
+}
 
-  Buttons.enquire = { x: View.cssW / 2 - 150, y: y + h - 58, w: 144, h: 50 };
-  Buttons.again = { x: View.cssW / 2 + 6, y: y + h - 58, w: 144, h: 50 };
-  drawButton(ctx, Buttons.enquire, 'ENQUIRE', true);
-  drawButton(ctx, Buttons.again, 'PLAY AGAIN', false);
+// Arc gauge 135deg..405deg, needle eases in with a slight overshoot.
+function drawStabilityDial(ctx, dx, dy, rad, r) {
+  const start = Math.PI * 0.75, span = Math.PI * 1.5;
+  const p = easeOutCubic((r.t - 0.5) / 0.8);
+  const over = 1 + 0.06 * Math.sin(p * Math.PI);            // tiny overshoot
+  const frac = Math.max(0, Math.min(1, (r.stability / 100) * p * over));
+  ctx.save();
+  ctx.lineCap = 'butt';
+  ctx.strokeStyle = 'rgba(31,42,46,0.10)';
+  ctx.lineWidth = 9;
+  ctx.beginPath(); ctx.arc(dx, dy, rad, start, start + span); ctx.stroke();
+  ctx.strokeStyle = stabColor(frac);
+  ctx.beginPath(); ctx.arc(dx, dy, rad, start, start + span * frac); ctx.stroke();
+  // needle
+  const na = start + span * frac;
+  ctx.strokeStyle = COL.ink;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(dx, dy);
+  ctx.lineTo(dx + Math.cos(na) * (rad - 6), dy + Math.sin(na) * (rad - 6));
+  ctx.stroke();
+  ctx.fillStyle = COL.ink;
+  ctx.beginPath(); ctx.arc(dx, dy, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.textAlign = 'center';
+  ctx.font = '800 13px "Helvetica Neue", Arial, sans-serif';
+  ctx.fillText(Math.round(frac * 100) + '%', dx, dy + rad - 2);
+  ctx.font = '700 9px "Helvetica Neue", Arial, sans-serif';
+  ctx.fillStyle = 'rgba(31,42,46,0.6)';
+  ctx.fillText('S T A B I L I T Y', dx, dy + rad + 14);
+  ctx.restore();
+}
+
+// Rubber-stamp grade: slams in (scale 1.6 -> 1) with a slight rotation.
+function drawGradeStamp(ctx, sx, sy, r) {
+  if (r.t < 1.2) return;
+  if (!r.stamped) { r.stamped = true; AudioFX.thunk(); }
+  const sc = 1.6 - 0.6 * easeOutCubic((r.t - 1.2) / 0.18);
+  const col = r.won ? COL.terracotta : COL.terracottaDeep;
+  ctx.save();
+  ctx.translate(sx, sy);
+  ctx.rotate(-0.12);
+  ctx.scale(sc, sc);
+  ctx.globalAlpha = Math.min(1, (r.t - 1.2) / 0.1);
+  ctx.strokeStyle = col;
+  ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.arc(0, 0, 34, 0, Math.PI * 2); ctx.stroke();
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(0, 0, 29, 0, Math.PI * 2); ctx.stroke();
+  ctx.fillStyle = col;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  if (r.grade === 'SITE VISIT REQUIRED') {
+    ctx.font = '800 8px "Helvetica Neue", Arial, sans-serif';
+    ctx.fillText('SITE VISIT', 0, -5);
+    ctx.fillText('REQUIRED', 0, 6);
+  } else {
+    ctx.font = '900 22px Georgia, serif';
+    ctx.fillText(r.grade, 0, 1);
+    ctx.font = '700 7px "Helvetica Neue", Arial, sans-serif';
+    ctx.fillText('BUILD GRADE', 0, 16);
+  }
+  ctx.restore();
 }
 
 // Master render.
@@ -1872,8 +1978,9 @@ function render() {
   // Screen-space chrome.
   drawHUD(ctx);
   if (Game.state === STATE.START) drawStartScreen(ctx);
-  else if (Game.state === STATE.LOSE) drawLoseScreen(ctx);
-  else if (Game.state === STATE.WIN_OVERLAY) drawWinOverlay(ctx);
+  else if (Game.state === STATE.LOSE || Game.state === STATE.WIN_OVERLAY) {
+    drawResultCard(ctx);
+  }
 }
 
 /* ============================================================================
@@ -1895,12 +2002,14 @@ function handlePrimaryAction(px, py) {
       dropFloor();
       break;
     case STATE.LOSE:
-      if (px == null || pointInRect(px, py, Buttons.retry)) { AudioFX.click(); startGame(); }
-      break;
     case STATE.WIN_OVERLAY:
-      if (px != null && pointInRect(px, py, Buttons.again)) { AudioFX.click(); startGame(); }
-      else if (px != null && pointInRect(px, py, Buttons.enquire)) { AudioFX.click(); /* no-op CTA */ }
-      else if (px == null) { AudioFX.click(); startGame(); }
+      if (px != null && pointInRect(px, py, Buttons.project)) {
+        Buttons.pressed = { rect: Buttons.project, t: Game.fxTime };
+        AudioFX.click(); openProject();
+      } else if (px != null && pointInRect(px, py, Buttons.again)) {
+        Buttons.pressed = { rect: Buttons.again, t: Game.fxTime };
+        AudioFX.click(); startGame();
+      } else if (px == null) { AudioFX.click(); startGame(); }
       break;
     default:
       // DROPPING / SETTLE / WIN_SEQ ignore input.
