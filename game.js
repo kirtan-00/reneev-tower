@@ -48,21 +48,23 @@ const CFG = {
 
   // Crane geometry (world units, relative to current build height).
   CRANE_CLEARANCE: 230,   // how far the jib sits above the current tower top
-  CABLE_LEN: 120,         // pendulum cable length L
   JIB_LEN: 360,           // length of working jib (to the right of mast)
   COUNTERJIB_LEN: 74,
 
-  // Pendulum tuning (difficulty ramps with floor number).
-  SWING_AMP_MIN: 0.30,    // radians at floor 1 (wider, harder)
-  SWING_AMP_MAX: 0.92,    // radians near floor 22 (~53 deg)
-  SWING_OMEGA_MIN: 2.05,  // rad/s  (fast left-right)
-  SWING_OMEGA_MAX: 4.30,
-  TROLLEY_DRIFT: 42,      // px of trolley traverse (more lateral coverage)
-  TROLLEY_OMEGA: 0.8,
+  // Driven-pendulum physics (integrated; trolley motion drives the swing).
+  PEND_G: 2600,            // matches fall gravity
+  PEND_DAMP: 0.32,         // angular damping (keeps motion periodic, not chaotic)
+  PEND_L_MIN: 100,         // cable length at floor 22 (shorter = faster)
+  PEND_L_MAX: 150,         // cable length at floor 1
+  TROLLEY_AMP_MIN: 52,     // trolley traverse half-range, floor 1
+  TROLLEY_AMP_MAX: 96,     // floor 22  (already includes the 10%-easier pass)
+  TROLLEY_W_MIN: 1.25,     // trolley angular speed rad/s, floor 1
+  TROLLEY_W_MAX: 2.42,     // floor 22
+  THETA_CLAMP: 1.0,        // |theta| hard cap (rad)
+  THETA_DOT_CLAMP: 7.0,
 
   // Drop physics.
   GRAVITY: 2600,          // world px / s^2
-  SWAY_DAMP: 0.86,        // residual sway damping per second factor
   MAX_FALL_VX: 900,
 
   // Placement rules.
@@ -264,7 +266,7 @@ const Game = {
   fxTime: 0,           // always-advancing clock for wobble / fx
 
   // The currently hooked / falling floor.
-  moving: null,        // {floor, x, y, w, vx, vy, swayPhase, swayAmp}
+  moving: null,        // {floor, x, y, w, h, vx, vy, theta, thetaDot, rot, rotV, prev*, falling}
 
   // Visual fx.
   offcuts: [],         // tumbling slices {img,sx,sw, x,y,w,h, vx,vy,rot,vr,alpha}
@@ -321,41 +323,68 @@ function startGame() {
 function spawnMovingFloor() {
   const w = Game.topWidth;
   const h = w * (CFG.FLOOR_H / CFG.FLOOR_W);
+  // Reset drive phase so every floor starts from a clean trolley pose.
+  Game.time = 0;
+  // Seed at the hook directly under the (zero-phase) pivot so the first physics
+  // tick doesn't pop the slab into place.
+  const jibY = craneJibY();
+  const seedY = jibY + 40;
   Game.moving = {
     floor: Game.nextFloor,
     w: w,
     h: h,
-    // x/y filled by physics each frame (hangs from hook). Start at jib.
     x: 0,
-    y: towerTopY() - CFG.CRANE_CLEARANCE,
+    y: seedY,                     // matches the resting hang point from stepPhysics
     vx: 0,
     vy: 0,
-    swayAmp: 0,       // residual sway after drop
-    swayPhase: 0,
+    // Driven pendulum state.
+    theta: 0,
+    thetaDot: 0,
+    rot: 0,
+    rotV: 0,
+    // Previous-step snapshots (for render interpolation in a future task).
+    prevX: 0,
+    prevY: seedY,
+    prevRot: 0,
     falling: false,
   };
 }
 
 /* ============================================================================
    5. CRANE PENDULUM PHYSICS  (fixed timestep)
-   Pivot = trolley on the jib. Slab hangs at angle theta from vertical.
-   theta(t) = A * sin(omega*t); slabX = trolleyX + L*sin(theta).
-   Release velocity is computed NUMERICALLY (prevX -> x over dt).
+   Driven damped pendulum: trolley traverses sinusoidally, its lateral motion
+   forces the slab through the cable. Semi-implicit Euler at 120 Hz keeps it
+   stable; angular damping keeps it periodic-but-not-metronomic. Difficulty
+   ramps L shorter and trolley amp+speed higher with floor.
    ========================================================================== */
 
-// Difficulty-scaled amplitude / speed for the current floor.
-function swingParams(floor) {
+// Difficulty-scaled cable length + trolley drive for the current floor.
+function pendParams(floor) {
   const t = (floor - 1) / (CFG.TOTAL_FLOORS - 1); // 0..1
-  const ease = t * t * (3 - 2 * t); // smoothstep ramp
+  const ease = t * t * (3 - 2 * t);               // smoothstep
   return {
-    amp: CFG.SWING_AMP_MIN + (CFG.SWING_AMP_MAX - CFG.SWING_AMP_MIN) * ease,
-    omega: CFG.SWING_OMEGA_MIN + (CFG.SWING_OMEGA_MAX - CFG.SWING_OMEGA_MIN) * ease,
+    L:    CFG.PEND_L_MAX  + (CFG.PEND_L_MIN  - CFG.PEND_L_MAX)  * ease,
+    tAmp: CFG.TROLLEY_AMP_MIN + (CFG.TROLLEY_AMP_MAX - CFG.TROLLEY_AMP_MIN) * ease,
+    tW:   CFG.TROLLEY_W_MIN   + (CFG.TROLLEY_W_MAX   - CFG.TROLLEY_W_MIN)   * ease,
   };
 }
 
-// Trolley world-x (slow drift adds life; pivot of the pendulum).
+// Trolley pose (position, velocity, acceleration) — pivot of the pendulum.
+// Zero whenever there's no active slab so nothing pops at SETTLE→spawn boundary.
 function trolleyX() {
-  return Math.sin(Game.time * CFG.TROLLEY_OMEGA) * CFG.TROLLEY_DRIFT;
+  if (!Game.moving) return 0;
+  const p = pendParams(Game.moving.floor);
+  return Math.sin(Game.time * p.tW) * p.tAmp;
+}
+function trolleyVX() {
+  if (!Game.moving) return 0;
+  const p = pendParams(Game.moving.floor);
+  return Math.cos(Game.time * p.tW) * p.tAmp * p.tW;
+}
+function trolleyAX() {
+  if (!Game.moving) return 0;
+  const p = pendParams(Game.moving.floor);
+  return -Math.sin(Game.time * p.tW) * p.tAmp * p.tW * p.tW;
 }
 
 // Jib/hook world-y above the tower top.
@@ -363,35 +392,47 @@ function craneJibY() {
   return towerTopY() - CFG.CRANE_CLEARANCE;
 }
 
-let _prevSlabX = 0;
+// Numeric clamp helper.
+function _clamp(v, lo, hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
 function stepPhysics(dt) {
   const m = Game.moving;
   if (!m) return;
 
   if (Game.state === STATE.PLAYING) {
-    // Pendulum swing.
     Game.time += dt;
-    const sp = swingParams(m.floor);
-    const theta = sp.amp * Math.sin(sp.omega * Game.time);
-    const pivotX = trolleyX();
-    const jibY = craneJibY();
-    const newX = pivotX + CFG.CABLE_LEN * Math.sin(theta);
+    const p = pendParams(m.floor);
 
-    _prevSlabX = m.x;
-    m.x = newX;
-    m.y = jibY + CFG.CABLE_LEN * Math.cos(theta) - CFG.CABLE_LEN + 40; // hang point
-    // store velocity continuously for release snapshot
-    m.vx = (m.x - _prevSlabX) / dt;
+    // Driven damped pendulum (semi-implicit Euler). Trolley horizontal accel
+    // enters through the d'Alembert term -aP*cos(theta)/L; gravity restores
+    // toward straight-down; damping bleeds energy so swing stays periodic.
+    const aP = trolleyAX();
+    const thetaDD = -(CFG.PEND_G / p.L) * Math.sin(m.theta)
+                    - CFG.PEND_DAMP * m.thetaDot
+                    - (aP / p.L) * Math.cos(m.theta);
+    m.thetaDot += thetaDD * dt;
+    m.thetaDot = _clamp(m.thetaDot, -CFG.THETA_DOT_CLAMP, CFG.THETA_DOT_CLAMP);
+    m.theta   += m.thetaDot * dt;
+    m.theta   = _clamp(m.theta, -CFG.THETA_CLAMP, CFG.THETA_CLAMP);
+
+    // Capture prev BEFORE writing new pose (render-interp ready).
+    m.prevX = m.x; m.prevY = m.y; m.prevRot = m.rot;
+
+    const pivotX = trolleyX();
+    const jibY   = craneJibY();
+    m.x = pivotX + p.L * Math.sin(m.theta);
+    m.y = jibY + p.L * Math.cos(m.theta) - p.L + 40;   // 40 = hook-to-slab-top offset
+    m.rot = m.theta * 0.6;                              // slab tilts with the cable
+    // Continuous velocity = trolley translation + cable tangential.
+    m.vx = trolleyVX() + p.L * Math.cos(m.theta) * m.thetaDot;
   } else if (Game.state === STATE.DROPPING) {
-    // Projectile fall with gravity + small damped residual sway.
+    // Projectile fall with gravity + cosmetic rotation decay.
+    m.prevX = m.x; m.prevY = m.y; m.prevRot = m.rot;
     m.vy += CFG.GRAVITY * dt;
     m.x += m.vx * dt;
     m.y += m.vy * dt;
-
-    // Residual sway (decays) — purely cosmetic horizontal jitter.
-    m.swayPhase += dt * 8;
-    m.swayAmp *= Math.pow(CFG.SWAY_DAMP, dt * 60 / 60);
+    m.rot += m.rotV * dt;
+    m.rotV *= Math.pow(0.5, dt * 4);                    // half-life ~0.25 s
 
     // Has it reached the landing surface? (Skip for a missed slab so it
     // plummets past the tower instead of re-resolving.)
@@ -418,10 +459,13 @@ function stepPhysics(dt) {
 function dropFloor() {
   if (Game.state !== STATE.PLAYING || !Game.moving) return;
   const m = Game.moving;
+  const p = pendParams(m.floor);
   m.vx = Math.max(-CFG.MAX_FALL_VX, Math.min(CFG.MAX_FALL_VX, m.vx));
-  m.vy = 0;
-  m.swayAmp = Math.abs(m.vx) * 0.02;
-  m.swayPhase = 0;
+  // Inherit a touch of cable-tangential vertical velocity (only if the slab was
+  // rising at the moment of release we let it travel up briefly; otherwise 0).
+  m.vy = Math.max(0, -p.L * Math.sin(m.theta) * m.thetaDot) * 0.3;
+  // Carry a fraction of angular velocity into the falling slab as visual spin.
+  m.rotV = m.thetaDot * 0.5;
   Game.state = STATE.DROPPING;
 }
 
@@ -1089,19 +1133,24 @@ function drawBlock(ctx, b) {
 }
 
 // Draw the moving (hooked or falling) floor at full width PNG [0,1].
+// Slab rotates about its TOP-CENTRE (the hook point) so the cable from the
+// trolley to the slab top stays visually attached at all angles.
 function drawMoving(ctx) {
   const m = Game.moving;
   if (!m) return;
-  const sway = Game.state === STATE.DROPPING ? Math.sin(m.swayPhase) * m.swayAmp : 0;
-  const cx = m.x + sway;
-  const dx = wx(cx - m.w / 2);
-  const dy = wy(m.y);
+  const cxs = wx(m.x);
+  const cys = wy(m.y);                  // m.y is slab TOP-y
   const dw = wlen(m.w);
   const dh = wlen(m.h);
-  drawImageOrRect(ctx, Assets.floors[m.floor - 1], dx, dy, dw, dh,
+  ctx.save();
+  ctx.translate(cxs, cys);
+  ctx.rotate(m.rot);
+  // Draw image offset so the rotation pivot sits at the slab top-centre.
+  drawImageOrRect(ctx, Assets.floors[m.floor - 1], -dw / 2, 0, dw, dh,
     m.floor % 2 ? COL.taupe : COL.beige);
   ctx.fillStyle = 'rgba(31,42,46,0.10)';
-  ctx.fillRect(dx, dy + dh - wlen(2), dw, wlen(2));
+  ctx.fillRect(-dw / 2, dh - wlen(2), dw, wlen(2));
+  ctx.restore();
 }
 
 // The named feature: a tower crane (mast, jib, counter-jib, counterweight,
