@@ -68,12 +68,12 @@ const CFG = {
   MAX_FALL_VX: 900,
 
   // Placement rules.
-  PERFECT_TOL: 9,         // |offset| within this = a "perfect" (combo + recovery)
+  PERFECT_TOL: 10,        // |offset| within this = a "perfect" (combo + recovery)
   // --- Stability model (floors are NEVER trimmed/shrunk; off-centre hurts stability) ---
   STAB_MAX: 100,          // full, brand-new building
   LOSE_THRESHOLD: 60,     // at or below 60% stability the run ends (retry)
-  STAB_SAFE: 14,          // |offset| under this does no damage
-  STAB_DMG_SCALE: 62,     // damage for an offset of one full floor width
+  STAB_SAFE: 15.4,        // |offset| under this does no damage
+  STAB_DMG_SCALE: 56,     // damage for an offset of one full floor width
   STAB_RECOVER: 5,        // stability regained on a perfect placement
 
   // Camera.
@@ -195,6 +195,7 @@ const View = {
   originX: 0,      // screen x of world x=0 (column center)
   cameraY: 0,      // world y currently centered-ish in frame
   anchorY: 0,      // screen y that cameraY maps to (lerps up for the win reveal)
+  alpha: 0,        // render interpolation fraction [0,1] = leftover accumulator / DT
 };
 
 function resizeCanvas() {
@@ -273,6 +274,8 @@ const Game = {
   flashes: [],         // perfect-drop pulses {x,y,t}
   confetti: [],        // win burst particles
   pulse: 0,            // global scale-pulse for perfect feedback
+  landFx: null,        // landing squash+settle on last placed block {t, rot, mag}
+  kick: null,          // tower micro-kick on landing {t, amp}
 
   // Sequence timers.
   seqT: 0,
@@ -307,6 +310,8 @@ function startGame() {
   Game.stabShown = CFG.STAB_MAX;
   Game.time = 0;
   Game.pulse = 0;
+  Game.landFx = null;
+  Game.kick = null;
   Game.nextFloor = 1;
   Game.topWidth = CFG.FLOOR_DRAW_W;
   Game.crownY = 0;
@@ -500,6 +505,10 @@ function resolvePlacement() {
   });
   Game.score = m.floor;
 
+  // Landing feel: squash+settle on the newly placed block and a micro tower kick.
+  Game.landFx = { t: 0, rot: m.rot, mag: Math.min(1, absOff / (m.w * 0.25)) };
+  Game.kick   = { t: 0, amp: Math.min(0.018, 0.004 + absOff * 0.00035) };
+
   // Stability: a centred drop is safe (and recovers a little); the further
   // off-centre, the more the building's stability drains.
   if (absOff <= CFG.PERFECT_TOL) {
@@ -675,9 +684,16 @@ function wobbleAngle() {
       Game.state !== STATE.SETTLE) return 0;
   const span = CFG.STAB_MAX - CFG.LOSE_THRESHOLD;     // 40 pts of headroom
   const instab = Math.max(0, Math.min(1, (CFG.STAB_MAX - Game.stabShown) / span));
-  if (instab <= 0.02) return 0;
-  const amp = instab * instab * 0.06;                  // up to ~3.4 deg, eases in
-  return amp * Math.sin(Game.fxTime * 5.0);
+  let base = 0;
+  if (instab > 0.02) {
+    const amp = instab * instab * 0.06;                // up to ~3.4 deg, eases in
+    base = amp * Math.sin(Game.fxTime * 5.0);
+  }
+  let kick = 0;
+  if (Game.kick && Game.kick.t < 1.2) {
+    kick = Game.kick.amp * Math.sin(Game.kick.t * 16) * Math.exp(-Game.kick.t * 3.5);
+  }
+  return base + kick;
 }
 
 function updateFx(dt) {
@@ -698,6 +714,10 @@ function updateFx(dt) {
 
   // Global pulse decay.
   Game.pulse = Math.max(0, Game.pulse - dt * 3.2);
+
+  // Landing feel timers.
+  if (Game.landFx) Game.landFx.t += dt;
+  if (Game.kick)   Game.kick.t   += dt;
 
   // Confetti.
   for (const c of Game.confetti) {
@@ -1119,17 +1139,43 @@ function drawBase(ctx) {
 // Draw a placed block using its own PNG sub-crop.
 function drawBlock(ctx, b) {
   const img = Assets.floors[b.imgIndex];
-  const dx = wx(b.cx - b.w / 2);
-  const dy = wy(b.topY);
-  const dw = wlen(b.w);
-  const dh = wlen(b.h);
   const sx = b.u0 * CFG.FLOOR_W;
   const sw = (b.u1 - b.u0) * CFG.FLOOR_W;
-  drawImageCropOrRect(ctx, img, sx, 0, sw, CFG.FLOOR_H, dx, dy, dw, dh,
-    b.floor % 2 ? COL.taupe : COL.beige);
-  // subtle floor seam shadow
-  ctx.fillStyle = 'rgba(31,42,46,0.10)';
-  ctx.fillRect(dx, dy + dh - wlen(2), dw, wlen(2));
+  const isLast = (b === Game.blocks[Game.blocks.length - 1]);
+  const fx = Game.landFx;
+  const doAnim = isLast && fx && fx.t < 0.7;
+
+  if (doAnim) {
+    // Squash on impact, then settle-wobble as block comes to rest.
+    const t = fx.t;
+    const squash = t < 0.12 ? 1 - 0.06 * Math.sin(Math.PI * (t / 0.12)) : 1;
+    const rot = fx.rot * Math.exp(-t * 6) * Math.cos(t * 22);
+    // Centre of the block in screen coords.
+    const cx = wx(b.cx);
+    const cy = wy(b.topY + b.h / 2);
+    const dw = wlen(b.w);
+    const dh = wlen(b.h);
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(rot);
+    ctx.scale(1, squash);
+    drawImageCropOrRect(ctx, img, sx, 0, sw, CFG.FLOOR_H,
+      -dw / 2, -dh / 2, dw, dh,
+      b.floor % 2 ? COL.taupe : COL.beige);
+    ctx.fillStyle = 'rgba(31,42,46,0.10)';
+    ctx.fillRect(-dw / 2, dh / 2 - wlen(2), dw, wlen(2));
+    ctx.restore();
+  } else {
+    const dx = wx(b.cx - b.w / 2);
+    const dy = wy(b.topY);
+    const dw = wlen(b.w);
+    const dh = wlen(b.h);
+    drawImageCropOrRect(ctx, img, sx, 0, sw, CFG.FLOOR_H, dx, dy, dw, dh,
+      b.floor % 2 ? COL.taupe : COL.beige);
+    // subtle floor seam shadow
+    ctx.fillStyle = 'rgba(31,42,46,0.10)';
+    ctx.fillRect(dx, dy + dh - wlen(2), dw, wlen(2));
+  }
 }
 
 // Draw the moving (hooked or falling) floor at full width PNG [0,1].
@@ -1138,13 +1184,18 @@ function drawBlock(ctx, b) {
 function drawMoving(ctx) {
   const m = Game.moving;
   if (!m) return;
-  const cxs = wx(m.x);
-  const cys = wy(m.y);                  // m.y is slab TOP-y
+  // Render-interpolate between the last two physics ticks for smooth visuals.
+  const a = View.alpha || 0;
+  const rx   = m.prevX   + (m.x   - m.prevX)   * a;
+  const ry   = m.prevY   + (m.y   - m.prevY)   * a;
+  const rrot = m.prevRot + (m.rot - m.prevRot) * a;
+  const cxs = wx(rx);
+  const cys = wy(ry);                   // ry is slab TOP-y
   const dw = wlen(m.w);
   const dh = wlen(m.h);
   ctx.save();
   ctx.translate(cxs, cys);
-  ctx.rotate(m.rot);
+  ctx.rotate(rrot);
   // Draw image offset so the rotation pivot sits at the slab top-centre.
   drawImageOrRect(ctx, Assets.floors[m.floor - 1], -dw / 2, 0, dw, dh,
     m.floor % 2 ? COL.taupe : COL.beige);
@@ -1829,6 +1880,7 @@ function tick(nowMs) {
     update(CFG.DT);
     _acc -= CFG.DT;
   }
+  View.alpha = _acc / CFG.DT;  // render interpolation fraction [0,1]
   render();
 }
 
