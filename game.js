@@ -1827,9 +1827,10 @@ function drawResultCard(ctx) {
   if (r.won) {
     if (Assets.wordmark && Assets.wordmark.loaded) {
       const iw = Assets.wordmark.width, ih = Assets.wordmark.height;
-      const dw = Math.min(w - 150, iw);
+      // Cap height so the wordmark never collides with the message below.
+      const dw = Math.min(w - 150, iw, 38 * (iw / ih));
       const dh = dw * (ih / iw);
-      ctx.drawImage(Assets.wordmark, cx - dw / 2, y + 38, dw, dh);
+      ctx.drawImage(Assets.wordmark, cx - dw / 2, y + 40, dw, dh);
     } else {
       ctx.fillStyle = COL.terracotta;
       ctx.font = '900 26px Georgia, serif';
@@ -1902,10 +1903,8 @@ function drawStabilityDial(ctx, dx, dy, rad, r) {
   ctx.beginPath(); ctx.arc(dx, dy, 3, 0, Math.PI * 2); ctx.fill();
   ctx.textAlign = 'center';
   ctx.font = '800 13px "Helvetica Neue", Arial, sans-serif';
+  ctx.fillStyle = COL.ink;
   ctx.fillText(Math.round(frac * 100) + '%', dx, dy + rad - 2);
-  ctx.font = '700 9px "Helvetica Neue", Arial, sans-serif';
-  ctx.fillStyle = 'rgba(31,42,46,0.6)';
-  ctx.fillText('S T A B I L I T Y', dx, dy + rad + 14);
   ctx.restore();
 }
 
