@@ -886,6 +886,8 @@ function drawGroundScene(ctx) {
 
   const W = View.cssW;
   const s = View.renderScale;
+  // Street quality tier: the neighbourhood levels up as the tower rises.
+  const tier = P22Logic.streetTier(Game.blocks.length);
   // Heights in world units -> screen via wlen for camera-correct scaling.
   const roadH = wlen(120);
   const pathH = wlen(34);
@@ -897,7 +899,7 @@ function drawGroundScene(ctx) {
 
   // Greenery strip + footpath just above the road (sits on the ground line).
   // Trees/hedge silhouettes along the kerb.
-  drawGreenery(ctx, groundScreenY, s);
+  drawGreenery(ctx, groundScreenY, s, tier);
 
   // Road surface (dark asphalt with petrol tint).
   const rg = ctx.createLinearGradient(0, roadTop, 0, roadBot);
@@ -910,16 +912,46 @@ function drawGroundScene(ctx) {
   ctx.fillStyle = '#3d525e';
   ctx.fillRect(0, roadTop, W, Math.max(1, wlen(3)));
 
-  // Lane dashes (centre line), scrolling subtly for life.
-  ctx.fillStyle = 'rgba(231,184,148,0.55)';
+  // Zebra crossing (tier 4+).
+  if (tier >= 4) {
+    ctx.fillStyle = 'rgba(243,234,217,0.75)';
+    const zw = wlen(10), zg = wlen(8), zx0 = W * 0.18;
+    for (let i = 0; i < 5; i++) {
+      ctx.fillRect(zx0 + i * (zw + zg), roadTop, zw, roadH);
+    }
+  }
+
+  // Lane dashes (centre line), scrolling subtly for life. Brighter from tier 2.
+  ctx.fillStyle = tier >= 2 ? 'rgba(231,184,148,0.85)' : 'rgba(231,184,148,0.55)';
   const dashW = wlen(34), gap = wlen(28), midY = roadTop + roadH * 0.5;
   const off = (Game.fxTime * 40 * s) % (dashW + gap);
   for (let x = -off; x < W; x += dashW + gap) {
     ctx.fillRect(x, midY - wlen(2), dashW, wlen(4));
   }
 
+  // Streetlight glow pools on the road (tier 10+, lamps drawn later).
+  const lampXs = [0.08, 0.5, 0.92];
+  if (tier >= 10) {
+    for (let i = 0; i < lampXs.length; i++) {
+      const lx = lampXs[i] * W;
+      const gl = ctx.createRadialGradient(lx, roadTop + roadH * 0.4, 0,
+                                          lx, roadTop + roadH * 0.4, wlen(60));
+      gl.addColorStop(0, 'rgba(247,222,190,0.18)');
+      gl.addColorStop(1, 'rgba(247,222,190,0)');
+      ctx.fillStyle = gl;
+      ctx.fillRect(lx - wlen(60), roadTop, wlen(120), roadH);
+    }
+  }
+
+  // Parked premium car in front of the project (tier 20+), behind moving traffic.
+  if (tier >= 20) {
+    const ph = wlen(26) * 0.9;
+    drawCar(ctx, W * 0.62, roadTop + roadH * 0.66 - ph, wlen(58) * 1.3, ph,
+            '#16161c', 1, 2);
+  }
+
   // Cars travelling horizontally across the road.
-  drawCars(ctx, roadTop, roadH, s);
+  drawCars(ctx, roadTop, roadH, s, tier);
 
   // Footpath below the road (beige paving).
   ctx.fillStyle = '#cdbb9a';
@@ -934,11 +966,94 @@ function drawGroundScene(ctx) {
     ctx.beginPath(); ctx.moveTo(x, pathTop); ctx.lineTo(x, pathTop + pathH); ctx.stroke();
   }
 
+  // Kerbside planters on the footpath (tier 12+).
+  if (tier >= 12) {
+    for (const fx of [0.3, 0.7]) {
+      const px = fx * W, pw = wlen(26), ph2 = wlen(12);
+      ctx.fillStyle = COL.terracotta;
+      ctx.fillRect(px - pw / 2, pathTop + pathH * 0.25, pw, ph2);
+      ctx.fillStyle = '#2c4a34';
+      ctx.beginPath();
+      ctx.arc(px, pathTop + pathH * 0.25, pw * 0.34, Math.PI, 0);
+      ctx.fill();
+    }
+  }
+
+  // Footpath bollards (tier 16+).
+  if (tier >= 16) {
+    ctx.fillStyle = COL.ink;
+    for (let i = 0; i < 6; i++) {
+      const bx = (0.08 + i * 0.168) * W;
+      ctx.fillRect(bx - wlen(1.5), pathTop + wlen(3), wlen(3), wlen(10));
+    }
+  }
+
+  // Streetlight poles standing on the footpath, reaching over the road
+  // (tier 8+; lamps lit from 10). Kept inside the road+footpath band so the
+  // building podium (drawn later, above the ground line) never hides them.
+  if (tier >= 8) {
+    for (let i = 0; i < lampXs.length; i++) {
+      const lx = lampXs[i] * W;
+      const poleW = wlen(4);
+      const footY = pathTop + pathH * 0.55;          // planted on the footpath
+      const topY = roadTop + wlen(6);                // head just under the kerb line
+      ctx.fillStyle = COL.craneInk;
+      ctx.fillRect(lx - poleW / 2, topY, poleW, footY - topY);
+      // curved arm reaching over the road
+      ctx.strokeStyle = COL.craneInk;
+      ctx.lineWidth = Math.max(1, wlen(3));
+      ctx.beginPath();
+      ctx.moveTo(lx, topY + wlen(4));
+      ctx.arcTo(lx + wlen(18), topY + wlen(2), lx + wlen(20), topY + wlen(10), wlen(14));
+      ctx.stroke();
+      // lamp head
+      ctx.fillStyle = tier >= 10 ? '#f7debe' : '#3d525e';
+      ctx.fillRect(lx + wlen(14), topY + wlen(6), wlen(10), wlen(5));
+    }
+  }
+
+  // Lit "PAGE 22" hoarding standing on the footpath, right side (tier 18+;
+  // sparkles from 20). Sits over the road band so it stays fully visible.
+  if (tier >= 18) {
+    const bw = wlen(150), bh = wlen(46);
+    const bx = W * 0.97 - bw, by = pathTop - bh - wlen(10);
+    ctx.fillStyle = COL.craneInk;                       // two legs
+    ctx.fillRect(bx + bw * 0.12, by + bh, wlen(5), wlen(16));
+    ctx.fillRect(bx + bw * 0.84, by + bh, wlen(5), wlen(16));
+    ctx.fillStyle = 'rgba(243,234,217,0.97)';           // paper board
+    ctx.fillRect(bx, by, bw, bh);
+    ctx.strokeStyle = COL.ink;
+    ctx.lineWidth = Math.max(1, wlen(2));
+    ctx.strokeRect(bx, by, bw, bh);
+    ctx.fillStyle = COL.terracotta;
+    ctx.font = '800 ' + Math.max(8, wlen(16)) + 'px Georgia, serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('PAGE 22', bx + bw / 2, by + bh / 2 + wlen(1));
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    if (tier >= 20) {
+      ctx.strokeStyle = 'rgba(247,222,190,0.9)';
+      ctx.lineWidth = Math.max(1, wlen(1.5));
+      const sparkXs = [0.1, 0.5, 0.92], sparkYs = [0.18, 0.82, 0.3];
+      for (let i = 0; i < 3; i++) {
+        const a = 0.5 + 0.5 * Math.sin(Game.fxTime * 3 + i * 2);
+        const sx2 = bx + bw * sparkXs[i], sy2 = by + bh * sparkYs[i], sr = wlen(4);
+        ctx.globalAlpha = a;
+        ctx.beginPath();
+        ctx.moveTo(sx2 - sr, sy2); ctx.lineTo(sx2 + sr, sy2);
+        ctx.moveTo(sx2, sy2 - sr); ctx.lineTo(sx2, sy2 + sr);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
+  }
+
   ctx.restore();
 }
 
 // Tree / hedge silhouettes along the kerb above the road.
-function drawGreenery(ctx, groundScreenY, s) {
+function drawGreenery(ctx, groundScreenY, s, tier) {
   const W = View.cssW;
   const baseY = groundScreenY + wlen(2);
   ctx.save();
@@ -954,8 +1069,8 @@ function drawGreenery(ctx, groundScreenY, s) {
     ctx.arc(x, baseY - hedgeH, bump * 0.6, Math.PI, 0);
     ctx.fill();
   }
-  // a few taller trees, evenly spaced, deterministic positions
-  const treeXs = [0.12, 0.34, 0.58, 0.8];
+  // a few taller trees, evenly spaced, deterministic positions (more from tier 12)
+  const treeXs = tier >= 12 ? GREEN_TREES_RICH : GREEN_TREES_BASE;
   for (let i = 0; i < treeXs.length; i++) {
     const tx = treeXs[i] * W;
     const trunkH = wlen(30 + (i % 2) * 8);
@@ -976,15 +1091,26 @@ function drawGreenery(ctx, groundScreenY, s) {
   ctx.restore();
 }
 
+// Tree position tables + luxury paint palette (precomputed; no per-frame alloc).
+const GREEN_TREES_BASE = [0.12, 0.34, 0.58, 0.8];
+const GREEN_TREES_RICH = [0.12, 0.22, 0.34, 0.58, 0.68, 0.8];
+const LUX_COLORS = ['#1a1a22', '#4a1f1f', '#dcd7c9'];
+
 // Cars moving horizontally across the road (positions from fxTime, no alloc).
-function drawCars(ctx, roadTop, roadH, s) {
+// Street tier upgrades: more cars (3 -> 4 -> 5) and better bodies
+// (hatchback -> sedan -> luxury) as the tower rises.
+function drawCars(ctx, roadTop, roadH, s, tier) {
   if (!BG.cars) return;
   const W = View.cssW;
   const span = W + wlen(160);             // travel distance incl. off-screen margin
-  for (let i = 0; i < BG.cars.length; i++) {
+  const carN = tier >= 16 ? 5 : tier >= 2 ? 4 : 3;
+  const style = tier >= 14 ? 2 : tier >= 6 ? 1 : 0;
+  for (let i = 0; i < carN && i < BG.cars.length; i++) {
     const car = BG.cars[i];
-    const len = wlen(car.len);
-    const h = wlen(car.lane === 0 ? 26 : 21);    // near lane bigger
+    let len = wlen(car.len);
+    let h = wlen(car.lane === 0 ? 26 : 21);      // near lane bigger
+    if (style === 1) len *= 1.15;
+    if (style === 2) { len *= 1.3; h *= 0.9; }
     const laneY = car.lane === 0
       ? roadTop + roadH * 0.66
       : roadTop + roadH * 0.34;
@@ -993,23 +1119,43 @@ function drawCars(ctx, roadTop, roadH, s) {
     if (t < 0) t += 1;
     let x = car.dir > 0 ? (-wlen(160) + t * span) : (W + wlen(160) - t * span);
     const y = laneY - h;
-    drawCar(ctx, x, y, len, h, car.color, car.dir);
+    const color = style === 2 ? LUX_COLORS[i % LUX_COLORS.length] : car.color;
+    drawCar(ctx, x, y, len, h, color, car.dir, style);
   }
 }
 
-function drawCar(ctx, x, y, w, h, color, dir) {
+// style 0 = hatchback (original), 1 = sedan, 2 = luxury.
+function drawCar(ctx, x, y, w, h, color, dir, style) {
+  style = style || 0;
   const r = Math.max(2, h * 0.18);
   // body
   ctx.fillStyle = color;
   roundRect(ctx, x, y, w, h, r); ctx.fill();
   // cabin (slightly lighter, offset toward travel direction)
   ctx.fillStyle = 'rgba(255,255,255,0.16)';
-  const cw = w * 0.42, ch = h * 0.5;
-  const cx = dir > 0 ? x + w * 0.30 : x + w * 0.28;
+  let cw, ch, cx;
+  if (style === 0) {
+    cw = w * 0.42; ch = h * 0.5;
+    cx = dir > 0 ? x + w * 0.30 : x + w * 0.28;
+  } else if (style === 1) {
+    cw = w * 0.44; ch = h * 0.42;            // lower, centred sedan cabin
+    cx = x + (w - cw) / 2;
+  } else {
+    cw = w * 0.52; ch = h * 0.40;            // long raked luxury cabin
+    cx = dir > 0 ? x + w * 0.26 : x + w * 0.22;
+  }
   roundRect(ctx, cx, y - ch * 0.45, cw, ch, r * 0.8); ctx.fill();
   // windows
   ctx.fillStyle = 'rgba(159,184,196,0.6)';
   roundRect(ctx, cx + cw * 0.08, y - ch * 0.35, cw * 0.84, ch * 0.6, r * 0.5); ctx.fill();
+  // sedan rocker line / luxury chrome line
+  if (style === 1) {
+    ctx.fillStyle = 'rgba(255,255,255,0.10)';
+    ctx.fillRect(x + w * 0.06, y + h * 0.82, w * 0.88, Math.max(1, h * 0.06));
+  } else if (style === 2) {
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.fillRect(x + w * 0.04, y + h * 0.5, w * 0.92, 1);
+  }
   // wheels
   ctx.fillStyle = '#14202e';
   const wr = h * 0.22;
