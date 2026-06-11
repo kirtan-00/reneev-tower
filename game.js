@@ -25,6 +25,7 @@
 
 const CFG = {
   TOTAL_FLOORS: 22,
+  PROJECT_URL: 'https://www.reneevdevelopers.com/',
 
   // Canonical art dimensions (from manifest; verified at load).
   FLOOR_W: 602,
@@ -254,6 +255,9 @@ const Game = {
   combo: 0,            // perfect streak
   bestCombo: 0,
   score: 0,            // floors completed
+  points: 0,           // running score (P22Logic.floorPoints per floor)
+  finalScore: 0,       // score * stability multiplier (set at game end)
+  result: null,        // 'win' | 'lose' (set at game end)
   stability: 100,      // building stability (0 = collapse). Shown top-right.
   stabShown: 100,      // smoothed value for the bar animation
   time: 0,             // accumulated game time (s) for pendulum phase
@@ -294,6 +298,9 @@ function startGame() {
   Game.combo = 0;
   Game.bestCombo = 0;
   Game.score = 0;
+  Game.points = 0;
+  Game.finalScore = 0;
+  Game.result = null;
   Game.stability = CFG.STAB_MAX;
   Game.stabShown = CFG.STAB_MAX;
   Game.time = 0;
@@ -464,6 +471,9 @@ function resolvePlacement() {
     Game.stability = Math.max(0, Game.stability - dmg);
     AudioFX.place();
   }
+
+  // Accumulate running score (combo already updated above).
+  Game.points += P22Logic.floorPoints(Game.combo);
 
   // Stability too low -> end the run (we never show the building fall).
   if (Game.stability <= CFG.LOSE_THRESHOLD) { triggerLose(); return; }
@@ -1317,6 +1327,18 @@ function drawHUD(ctx) {
   drawStabilityBar(ctx, View.cssW - pad - barW, pad + 2, barW, barH,
                    Game.stabShown / CFG.STAB_MAX, true);
 
+  // Running score (top-right), below stability bar % value.
+  // % label drawn at y = pad+2+12+13 = ~45 (alphabetic baseline in drawStabilityBar).
+  // We sit below it: label at pad+52, value at pad+66.
+  ctx.textAlign = 'right';
+  ctx.fillStyle = 'rgba(243,234,217,0.85)';
+  ctx.font = '700 11px "Helvetica Neue", Arial, sans-serif';
+  ctx.fillText('S C O R E', View.cssW - pad, pad + 52);
+  ctx.font = '800 20px "Helvetica Neue", Arial, sans-serif';
+  ctx.fillStyle = COL.paper;
+  ctx.fillText(Game.points.toLocaleString('en-IN'), View.cssW - pad, pad + 66);
+  ctx.textAlign = 'left';
+
   // Combo, tucked under the floor counter (left).
   if (Game.combo >= 2) {
     ctx.fillStyle = COL.terracotta;
@@ -1324,12 +1346,12 @@ function drawHUD(ctx) {
     ctx.fillText(`PERFECT x${Game.combo}`, pad, pad + 44);
   }
 
-  // Thin blueprint rule across the top.
+  // Thin blueprint rule across the top (pushed down to clear score readout).
   ctx.strokeStyle = 'rgba(243,234,217,0.25)';
   ctx.lineWidth = 1;
   ctx.beginPath();
-  ctx.moveTo(pad, pad + 58);
-  ctx.lineTo(View.cssW - pad, pad + 58);
+  ctx.moveTo(pad, pad + 90);
+  ctx.lineTo(View.cssW - pad, pad + 90);
   ctx.stroke();
 
   ctx.restore();
