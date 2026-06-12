@@ -273,6 +273,8 @@ const Game = {
   offcuts: [],         // tumbling slices {img,sx,sw, x,y,w,h, vx,vy,rot,vr,alpha}
   flashes: [],         // perfect-drop pulses {x,y,t}
   confetti: [],        // win burst particles
+  popups: [],          // floating score texts {x,y,text,perfect,t}
+  shake: null,         // {t, amp} screen shake on sloppy landings
   pulse: 0,            // global scale-pulse for perfect feedback
   landFx: null,        // landing squash+settle on last placed block {t, rot, mag}
   kick: null,          // tower micro-kick on landing {t, amp}
@@ -299,6 +301,8 @@ function startGame() {
   Game.offcuts = [];
   Game.flashes = [];
   Game.confetti = [];
+  Game.popups = [];
+  Game.shake = null;
   AudioFX.stopParty();
   Game.combo = 0;
   Game.bestCombo = 0;
@@ -522,11 +526,21 @@ function resolvePlacement() {
     Game.combo = 0;
     const dmg = Math.max(0, absOff - CFG.STAB_SAFE) / m.w * CFG.STAB_DMG_SCALE;
     Game.stability = Math.max(0, Game.stability - dmg);
+    // Short screen shake scaled by how sloppy the drop was.
+    if (absOff > CFG.STAB_SAFE) {
+      Game.shake = { t: 0, amp: Math.min(7, (absOff - CFG.STAB_SAFE) * 0.06) };
+    }
     AudioFX.place();
   }
 
-  // Accumulate running score (combo already updated above).
-  Game.points += P22Logic.floorPoints(Game.combo);
+  // Accumulate running score (combo already updated above) + floating popup.
+  const earned = P22Logic.floorPoints(Game.combo);
+  Game.points += earned;
+  Game.popups.push({
+    x: m.x, y: placedTopY - 30, t: 0, perfect: Game.combo >= 1,
+    text: Game.combo >= 2 ? `+${earned} PERFECT x${Game.combo}`
+        : Game.combo === 1 ? `+${earned} PERFECT` : `+${earned}`,
+  });
 
   // Stability too low -> end the run (we never show the building fall).
   if (Game.stability <= CFG.LOSE_THRESHOLD) { triggerLose(); return; }
@@ -740,6 +754,14 @@ function updateFx(dt) {
 
   // End-card entrance/count-up timeline.
   if (Game.result) Game.result.t += dt;
+
+  // Floating score popups + screen shake decay.
+  for (const p of Game.popups) p.t += dt;
+  Game.popups = Game.popups.filter(p => p.t < 1.1);
+  if (Game.shake) {
+    Game.shake.t += dt;
+    if (Game.shake.t > 0.5) Game.shake = null;
+  }
 
   // Landing feel timers.
   if (Game.landFx) Game.landFx.t += dt;
@@ -992,6 +1014,32 @@ function drawGroundScene(ctx) {
     ctx.beginPath(); ctx.moveTo(x, pathTop); ctx.lineTo(x, pathTop + pathH); ctx.stroke();
   }
 
+  // Earth cross-section + basement parking cutaway below the footpath, so a
+  // zoomed-out frame never shows empty air under the street.
+  const earthTop = pathTop + pathH;
+  if (earthTop < View.cssH) {
+    const eg = ctx.createLinearGradient(0, earthTop, 0, View.cssH);
+    eg.addColorStop(0, '#4a3a2c');
+    eg.addColorStop(1, '#2c2218');
+    ctx.fillStyle = eg;
+    ctx.fillRect(0, earthTop, W, View.cssH - earthTop);
+    // soil strata
+    ctx.strokeStyle = 'rgba(0,0,0,0.14)';
+    ctx.lineWidth = 1;
+    const stride = Math.max(8, wlen(26));
+    for (let yy = earthTop + stride; yy < View.cssH; yy += stride) {
+      ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(W, yy); ctx.stroke();
+    }
+    // scattered pebbles (deterministic, no alloc)
+    ctx.fillStyle = 'rgba(0,0,0,0.18)';
+    for (let i = 0; i < 24; i++) {
+      const pxx = ((i * 211) % 97) / 97 * W;
+      const pyy = earthTop + (((i * 137) % 89) / 89) * (View.cssH - earthTop);
+      ctx.beginPath(); ctx.arc(pxx, pyy, Math.max(1.5, wlen(2.5)), 0, Math.PI * 2); ctx.fill();
+    }
+    drawBasement(ctx, earthTop, W);
+  }
+
   // Kerbside planters on the footpath (tier 12+).
   if (tier >= 12) {
     for (const fx of [0.3, 0.7]) {
@@ -1114,6 +1162,59 @@ function drawGreenery(ctx, groundScreenY, s, tier) {
     ctx.arc(tx - crownR * 0.3, baseY - hedgeH - trunkH - crownR * 0.2, crownR * 0.7, 0, Math.PI * 2);
     ctx.fill();
   }
+  ctx.restore();
+}
+
+// Two cutaway basement parking levels under the building footprint.
+function drawBasement(ctx, top, W) {
+  if (top + 8 > View.cssH) return;
+  const bw = Math.min(W * 0.86, wlen(840));
+  const x0 = wx(0) - bw / 2;
+  const lh = Math.max(26, wlen(52));
+  const slab = Math.max(3, wlen(6));
+  const total = lh * 2 + slab * 3;
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, top, W, View.cssH - top); ctx.clip();
+  const labels = ['P1', 'P2'];
+  for (let lvl = 0; lvl < 2; lvl++) {
+    const ly = top + slab + lvl * (lh + slab);
+    // room
+    ctx.fillStyle = lvl === 0 ? '#5e5749' : '#534c3f';
+    ctx.fillRect(x0, ly, bw, lh);
+    // warm ceiling light strips + soft pools
+    for (let i = 0; i < 3; i++) {
+      const lx2 = x0 + bw * (0.2 + 0.3 * i);
+      ctx.fillStyle = 'rgba(247,222,190,0.10)';
+      ctx.fillRect(lx2 - wlen(20), ly + 2, wlen(40), lh - 4);
+      ctx.fillStyle = 'rgba(247,222,190,0.85)';
+      ctx.fillRect(lx2 - wlen(12), ly + 2, wlen(24), Math.max(1, wlen(2)));
+    }
+    // parked cars
+    const carW = wlen(52), carH = lh * 0.4;
+    for (let i = 0; i < 4; i++) {
+      const cxr = x0 + bw * (0.14 + 0.22 * i) + (lvl ? bw * 0.05 : 0);
+      drawCar(ctx, cxr, ly + lh - carH - Math.max(1, wlen(2)), carW, carH,
+              BG.carColors[(i + lvl * 2) % BG.carColors.length], i % 2 ? 1 : -1, 0);
+    }
+    // structural columns (in front of cars for cutaway depth)
+    ctx.fillStyle = '#6e6657';
+    for (let i = 1; i <= 4; i++) {
+      ctx.fillRect(x0 + (bw / 5) * i - wlen(5), ly, wlen(10), lh);
+    }
+    // level sign
+    ctx.fillStyle = COL.paper;
+    ctx.font = '800 ' + Math.max(9, wlen(13)) + 'px "Helvetica Neue", Arial, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(labels[lvl], x0 + wlen(10), ly + Math.max(12, wlen(18)));
+    // floor slab below the level
+    ctx.fillStyle = '#3b3429';
+    ctx.fillRect(x0 - slab, ly + lh, bw + slab * 2, slab);
+  }
+  // retaining walls + top slab
+  ctx.fillStyle = '#3b3429';
+  ctx.fillRect(x0 - slab, top, slab, total);
+  ctx.fillRect(x0 + bw, top, slab, total);
+  ctx.fillRect(x0 - slab, top, bw + slab * 2, slab);
   ctx.restore();
 }
 
@@ -1940,6 +2041,24 @@ function drawGradeStamp(ctx, sx, sy, r) {
   ctx.restore();
 }
 
+// Floating score popups: rise, hang, fade. Gold for perfects.
+function drawPopups(ctx) {
+  for (const p of Game.popups) {
+    const a = p.t < 0.8 ? 1 : 1 - (p.t - 0.8) / 0.3;
+    const yy = wy(p.y) - easeOutCubic(p.t / 1.1) * 54;
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, a);
+    ctx.textAlign = 'center';
+    ctx.font = '900 ' + (p.perfect ? 19 : 16) + 'px "Helvetica Neue", Arial, sans-serif';
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(31,42,46,0.55)';
+    ctx.strokeText(p.text, wx(p.x), yy);
+    ctx.fillStyle = p.perfect ? '#f4b860' : COL.paper;
+    ctx.fillText(p.text, wx(p.x), yy);
+    ctx.restore();
+  }
+}
+
 // Master render.
 function render() {
   const ctx = View.ctx;
@@ -1947,6 +2066,12 @@ function render() {
 
   // World-space scene with a subtle global pulse on perfect drops.
   ctx.save();
+  // Screen shake on sloppy landings (world only; sky + HUD stay steady).
+  if (Game.shake) {
+    const k = 1 - Game.shake.t / 0.5;
+    ctx.translate(Math.sin(Game.shake.t * 55) * Game.shake.amp * k,
+                  Math.cos(Game.shake.t * 47) * Game.shake.amp * 0.6 * k);
+  }
   if (Game.pulse > 0) {
     const s = 1 + Game.pulse * 0.012;
     ctx.translate(View.cssW / 2, View.cssH * 0.62);
@@ -1970,6 +2095,7 @@ function render() {
 
   drawCrane(ctx);
   drawFlashes(ctx);
+  drawPopups(ctx);
   if (Game.state === STATE.WIN_SEQ) drawConfetti(ctx);
 
   ctx.restore();
