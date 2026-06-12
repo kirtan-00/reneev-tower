@@ -1037,7 +1037,6 @@ function drawGroundScene(ctx) {
       const pyy = earthTop + (((i * 137) % 89) / 89) * (View.cssH - earthTop);
       ctx.beginPath(); ctx.arc(pxx, pyy, Math.max(1.5, wlen(2.5)), 0, Math.PI * 2); ctx.fill();
     }
-    drawBasement(ctx, earthTop, W);
   }
 
   // Kerbside planters on the footpath (tier 12+).
@@ -1162,59 +1161,6 @@ function drawGreenery(ctx, groundScreenY, s, tier) {
     ctx.arc(tx - crownR * 0.3, baseY - hedgeH - trunkH - crownR * 0.2, crownR * 0.7, 0, Math.PI * 2);
     ctx.fill();
   }
-  ctx.restore();
-}
-
-// Two cutaway basement parking levels under the building footprint.
-function drawBasement(ctx, top, W) {
-  if (top + 8 > View.cssH) return;
-  const bw = Math.min(W * 0.86, wlen(840));
-  const x0 = wx(0) - bw / 2;
-  const lh = Math.max(26, wlen(52));
-  const slab = Math.max(3, wlen(6));
-  const total = lh * 2 + slab * 3;
-  ctx.save();
-  ctx.beginPath(); ctx.rect(0, top, W, View.cssH - top); ctx.clip();
-  const labels = ['P1', 'P2'];
-  for (let lvl = 0; lvl < 2; lvl++) {
-    const ly = top + slab + lvl * (lh + slab);
-    // room
-    ctx.fillStyle = lvl === 0 ? '#5e5749' : '#534c3f';
-    ctx.fillRect(x0, ly, bw, lh);
-    // warm ceiling light strips + soft pools
-    for (let i = 0; i < 3; i++) {
-      const lx2 = x0 + bw * (0.2 + 0.3 * i);
-      ctx.fillStyle = 'rgba(247,222,190,0.10)';
-      ctx.fillRect(lx2 - wlen(20), ly + 2, wlen(40), lh - 4);
-      ctx.fillStyle = 'rgba(247,222,190,0.85)';
-      ctx.fillRect(lx2 - wlen(12), ly + 2, wlen(24), Math.max(1, wlen(2)));
-    }
-    // parked cars
-    const carW = wlen(52), carH = lh * 0.4;
-    for (let i = 0; i < 4; i++) {
-      const cxr = x0 + bw * (0.14 + 0.22 * i) + (lvl ? bw * 0.05 : 0);
-      drawCar(ctx, cxr, ly + lh - carH - Math.max(1, wlen(2)), carW, carH,
-              BG.carColors[(i + lvl * 2) % BG.carColors.length], i % 2 ? 1 : -1, 0);
-    }
-    // structural columns (in front of cars for cutaway depth)
-    ctx.fillStyle = '#6e6657';
-    for (let i = 1; i <= 4; i++) {
-      ctx.fillRect(x0 + (bw / 5) * i - wlen(5), ly, wlen(10), lh);
-    }
-    // level sign
-    ctx.fillStyle = COL.paper;
-    ctx.font = '800 ' + Math.max(9, wlen(13)) + 'px "Helvetica Neue", Arial, sans-serif';
-    ctx.textAlign = 'left';
-    ctx.fillText(labels[lvl], x0 + wlen(10), ly + Math.max(12, wlen(18)));
-    // floor slab below the level
-    ctx.fillStyle = '#3b3429';
-    ctx.fillRect(x0 - slab, ly + lh, bw + slab * 2, slab);
-  }
-  // retaining walls + top slab
-  ctx.fillStyle = '#3b3429';
-  ctx.fillRect(x0 - slab, top, slab, total);
-  ctx.fillRect(x0 + bw, top, slab, total);
-  ctx.fillRect(x0 - slab, top, bw + slab * 2, slab);
   ctx.restore();
 }
 
