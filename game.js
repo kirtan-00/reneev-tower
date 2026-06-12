@@ -120,8 +120,18 @@ function loadImage(src) {
   const img = new Image();
   img.loaded = false;
   img.failed = false;
+  let tries = 0;
   img.onload = () => { img.loaded = true; };
-  img.onerror = () => { img.failed = true; };
+  // Retry with backoff: flaky mobile networks / CDN cold starts would
+  // otherwise leave fallback rects for the whole session.
+  img.onerror = () => {
+    tries++;
+    if (tries <= 3) {
+      setTimeout(() => { img.src = src + '?retry=' + tries; }, 1000 * tries);
+    } else {
+      img.failed = true;
+    }
+  };
   img.src = src;
   return img;
 }
@@ -1658,11 +1668,11 @@ function drawHUD(ctx) {
   ctx.fillText(Game.points.toLocaleString('en-IN'), View.cssW - pad, pad + 66);
   ctx.textAlign = 'left';
 
-  // Combo, tucked under the floor counter (left).
+  // Combo chip, fully below the floor number (34px font box ends ~pad+56).
   if (Game.combo >= 2) {
     ctx.fillStyle = COL.terracotta;
-    ctx.font = '800 15px "Helvetica Neue", Arial, sans-serif';
-    ctx.fillText(`PERFECT x${Game.combo}`, pad, pad + 44);
+    ctx.font = '800 13px "Helvetica Neue", Arial, sans-serif';
+    ctx.fillText(`PERFECT x${Game.combo}`, pad, pad + 62);
   }
 
   // Thin blueprint rule across the top (pushed down to clear score readout).
