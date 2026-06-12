@@ -1672,7 +1672,7 @@ function drawHUD(ctx) {
   if (Game.combo >= 2) {
     ctx.fillStyle = COL.terracotta;
     ctx.font = '800 13px "Helvetica Neue", Arial, sans-serif';
-    ctx.fillText(`PERFECT x${Game.combo}`, pad, pad + 62);
+    ctx.fillText(`PERFECT x${Game.combo}`, pad, pad + 72);
   }
 
   // Thin blueprint rule across the top (pushed down to clear score readout).
