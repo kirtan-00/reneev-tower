@@ -25,7 +25,7 @@
 
 const CFG = {
   TOTAL_FLOORS: 22,
-  PROJECT_URL: 'https://www.reneevdevelopers.com/',
+  PROJECT_URL: 'https://www.reneevdevelopers.com/3-bhk-vaishnodevi/',
 
   // Canonical art dimensions (from manifest; verified at load).
   FLOOR_W: 602,
@@ -1095,26 +1095,35 @@ function drawGroundScene(ctx) {
     }
   }
 
-  // Lit "PAGE 22" hoarding standing on the footpath, right side (tier 18+;
-  // sparkles from 20). Sits over the road band so it stays fully visible.
-  if (tier >= 18) {
-    const bw = wlen(150), bh = wlen(46);
-    const bx = W * 0.97 - bw, by = pathTop - bh - wlen(10);
+  // PAGE 22 billboard standing by the building from the very start
+  // (project hoarding with the real logo; sparkles join at tier 20).
+  {
+    const bw = wlen(78), bh = wlen(104);
+    const bx = W * 0.97 - bw, by = pathTop - bh - wlen(6);
     ctx.fillStyle = COL.craneInk;                       // two legs
-    ctx.fillRect(bx + bw * 0.12, by + bh, wlen(5), wlen(16));
-    ctx.fillRect(bx + bw * 0.84, by + bh, wlen(5), wlen(16));
+    ctx.fillRect(bx + bw * 0.16, by + bh, wlen(5), wlen(14));
+    ctx.fillRect(bx + bw * 0.78, by + bh, wlen(5), wlen(14));
     ctx.fillStyle = 'rgba(243,234,217,0.97)';           // paper board
     ctx.fillRect(bx, by, bw, bh);
     ctx.strokeStyle = COL.ink;
     ctx.lineWidth = Math.max(1, wlen(2));
     ctx.strokeRect(bx, by, bw, bh);
-    ctx.fillStyle = COL.terracotta;
-    ctx.font = '800 ' + Math.max(8, wlen(16)) + 'px Georgia, serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('PAGE 22', bx + bw / 2, by + bh / 2 + wlen(1));
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'alphabetic';
+    if (Assets.wordmark && Assets.wordmark.loaded) {
+      // contain-fit the tall logo inside the board
+      const iw = Assets.wordmark.width, ih = Assets.wordmark.height;
+      const availW = bw - wlen(14), availH = bh - wlen(14);
+      const sc2 = Math.min(availW / iw, availH / ih);
+      const dw = iw * sc2, dh = ih * sc2;
+      ctx.drawImage(Assets.wordmark, bx + (bw - dw) / 2, by + (bh - dh) / 2, dw, dh);
+    } else {
+      ctx.fillStyle = COL.terracotta;
+      ctx.font = '800 ' + Math.max(8, wlen(15)) + 'px Georgia, serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('PAGE 22', bx + bw / 2, by + bh / 2);
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'alphabetic';
+    }
     if (tier >= 20) {
       ctx.strokeStyle = 'rgba(247,222,190,0.9)';
       ctx.lineWidth = Math.max(1, wlen(1.5));
@@ -1880,26 +1889,27 @@ function drawResultCard(ctx) {
   ctx.fillText(r.won ? 'T O P P E D   O U T' : 'S T A B I L I T Y   T O O   L O W',
                cx, y + 28);
 
-  // Brand line (win) — wordmark image if available, else serif text.
+  // Brand block (win) — tall monogram logo if available, else serif text.
   if (r.won) {
     if (Assets.wordmark && Assets.wordmark.loaded) {
       const iw = Assets.wordmark.width, ih = Assets.wordmark.height;
-      // Cap height so the wordmark never collides with the message below.
-      const dw = Math.min(w - 150, iw, 38 * (iw / ih));
-      const dh = dw * (ih / iw);
-      ctx.drawImage(Assets.wordmark, cx - dw / 2, y + 40, dw, dh);
+      const dh = 64, dw = dh * (iw / ih);     // portrait logo, fixed height
+      ctx.drawImage(Assets.wordmark, cx - dw / 2, y + 38, dw, dh);
     } else {
       ctx.fillStyle = COL.terracotta;
       ctx.font = '900 26px Georgia, serif';
-      ctx.fillText('PAGE 22', cx, y + 60);
+      ctx.fillText('PAGE 22', cx, y + 70);
     }
   }
+
+  // Layout shifts down on win to make room for the logo block.
+  const oy = r.won ? 18 : 0;
 
   // Tier message (up to two lines).
   ctx.fillStyle = COL.inkSoft;
   ctx.font = '500 14px "Helvetica Neue", Arial, sans-serif';
   const lines = wrapTwoLines(ctx, r.message, w - 56);
-  const msgY = r.won ? y + 86 : y + 58;
+  const msgY = r.won ? y + 118 : y + 58;
   for (let i = 0; i < lines.length; i++) {
     ctx.fillText(lines[i], cx, msgY + i * 19);
   }
@@ -1907,19 +1917,19 @@ function drawResultCard(ctx) {
   // Final score count-up + the math behind it.
   ctx.fillStyle = 'rgba(31,42,46,0.55)';
   ctx.font = '600 11px "Helvetica Neue", Arial, sans-serif';
-  ctx.fillText('F I N A L   S C O R E', cx, y + 138);
+  ctx.fillText('F I N A L   S C O R E', cx, y + 138 + oy);
   const shown = Math.round(r.final * easeOutCubic((r.t - 0.3) / 0.9));
   ctx.fillStyle = COL.terracotta;
   ctx.font = '900 44px Georgia, serif';
-  ctx.fillText(shown.toLocaleString('en-IN'), cx, y + 180);
+  ctx.fillText(shown.toLocaleString('en-IN'), cx, y + 180 + oy);
   ctx.fillStyle = 'rgba(31,42,46,0.55)';
   ctx.font = '600 12px "Helvetica Neue", Arial, sans-serif';
   ctx.fillText(`${r.points.toLocaleString('en-IN')} pts × ${(r.stability / 100).toFixed(2)} stability`,
-               cx, y + 202);
+               cx, y + 202 + oy);
 
   // Stability dial (left) + grade stamp (right).
-  drawStabilityDial(ctx, cx - 62, y + 252, 40, r);
-  drawGradeStamp(ctx, cx + 72, y + 248, r);
+  drawStabilityDial(ctx, cx - 62, y + 252 + oy / 2, r.won ? 36 : 40, r);
+  drawGradeStamp(ctx, cx + 72, y + 248 + oy / 2, r);
 
   ctx.restore();
 
